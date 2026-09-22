@@ -1,0 +1,29 @@
+{
+  "name": "cursor-clone",
+  "version": "0.1.0",
+  "description": "CLI-first autonomous coding agent (Cursor-like MVP)",
+  "type": "module",
+  "bin": {
+    "codeagent": "dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@vscode/ripgrep": "^1.18.0",
+    "dotenv": "^17.0.0",
+    "openai": "^7.9.0",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.0.0",
+    "vitest": "^4.0.0"
+  }
+}
