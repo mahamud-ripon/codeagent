@@ -8,12 +8,12 @@ export function truncate(text: string, maxChars: number): string {
   return text.slice(0, maxChars) + "\n...[truncated]";
 }
 
-/** Per-tool output budgets (chars). Tuned to keep context small. */
+/** Per-tool output budgets (chars). Tuned to keep context small and stay within TPM limits. */
 export const TRUNCATION_BUDGETS = {
-  fileRead: 30_000,
-  listFiles: 15_000,
-  search: 30_000,
-  terminal: 30_000,
-  gitDiff: 50_000,
-  gitStatus: 10_000,
+  fileRead: 12_000,
+  listFiles: 6_000,
+  search: 8_000,
+  terminal: 8_000,
+  gitDiff: 12_000,
+  gitStatus: 4_000,
 } as const;

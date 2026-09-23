@@ -1,7 +1,7 @@
 {
-  "name": "cursor-clone",
+  "name": "codeagent",
   "version": "0.1.0",
-  "description": "CLI-first autonomous coding agent (Cursor-like MVP)",
+  "description": "CLI-first autonomous coding agent",
   "type": "module",
   "bin": {
     "codeagent": "dist/index.js"
@@ -15,9 +15,13 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@clack/prompts": "^1.8.1",
     "@vscode/ripgrep": "^1.18.0",
+    "boxen": "^9.0.0",
     "dotenv": "^17.0.0",
     "openai": "^7.9.0",
+    "ora": "^9.4.1",
+    "picocolors": "^1.1.1",
     "zod": "^4.0.0"
   },
   "devDependencies": {

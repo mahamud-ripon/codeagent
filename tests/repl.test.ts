@@ -125,3 +125,21 @@ describe("saveApiKeyToEnvFile", () => {
     expect(() => saveApiKeyToEnvFile(tmp, "not a key")).toThrow();
   });
 });
+
+describe("session slash commands", () => {
+  it("parses session slash commands", () => {
+    expect(parseSlashCommand("/sessions")).toEqual({ cmd: "sessions", args: "" });
+    expect(parseSlashCommand("/session resume 1")).toEqual({ cmd: "session", args: "resume 1" });
+    expect(parseSlashCommand("/resume 2")).toEqual({ cmd: "resume", args: "2" });
+    expect(parseSlashCommand("/new Auth feature")).toEqual({ cmd: "new", args: "Auth feature" });
+  });
+
+  it("parses thought slash commands", () => {
+    expect(parseSlashCommand("/t")).toEqual({ cmd: "t", args: "" });
+    expect(parseSlashCommand("/thought")).toEqual({ cmd: "thought", args: "" });
+    expect(parseSlashCommand("/thought on")).toEqual({ cmd: "thought", args: "on" });
+    expect(parseSlashCommand("/thought off")).toEqual({ cmd: "thought", args: "off" });
+    expect(parseSlashCommand("/thought expand")).toEqual({ cmd: "thought", args: "expand" });
+  });
+});
+

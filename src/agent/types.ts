@@ -34,11 +34,15 @@ export interface AgentState {
   errors: string[];
 }
 
+export type AgentIntent = "conversational" | "inquiry" | "task";
+
 export interface AgentRunResult {
   finalMessage: string;
   iterations: number;
   modifiedFiles: string[];
   testResults: TestRecord[];
+  history?: unknown[];
+  intent?: AgentIntent;
 }
 
 export function createInitialState(userRequest: string): AgentState {

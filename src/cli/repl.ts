@@ -22,13 +22,47 @@ export { detectEndpointForKey } from "./config.js";
  * one-shot mode — zero agent logic lives in this file.
  */
 
+import { PermissionManager } from "../agent/permissions.js";
+import { compactHistory } from "../agent/compactor.js";
+import { CheckpointManager } from "../agent/checkpoint.js";
+import { getSandboxMode, setSandboxMode } from "../tools/sandbox.js";
+import {
+  createSession,
+  deleteSession,
+  formatTimeAgo,
+  listSessions,
+  loadSession,
+  saveSession,
+  type SessionRecord,
+} from "../session/sessionManager.js";
+import {
+  renderBanner,
+  ConsoleAgentReporter,
+  formatMarkdown,
+  formatDiff,
+  promptPermission,
+  promptSessionSelect,
+  printUserMessage,
+  formatThoughtLine,
+  latestThought,
+  pc,
+  icons,
+  colors,
+} from "./ui/index.js";
+
 export interface SessionConfig {
   repoRoot: string;
   model?: string;
   provider?: string;
   baseURL?: string;
   maxIterations: number;
+  history?: unknown[];
+  permissions?: PermissionManager;
+  checkpoints?: CheckpointManager;
+  activeSession?: SessionRecord;
+  autoExpandThought?: boolean;
 }
+
 
 export interface SlashCommand {
   cmd: string;
@@ -47,14 +81,14 @@ export function parseSlashCommand(line: string): SlashCommand | null {
   };
 }
 
-// Minimal ANSI styling, no dependencies.
+// Minimal ANSI styling aliases for backward compatibility.
 const c = {
-  bold: (s: string) => `\x1b[1m${s}\x1b[0m`,
-  dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
-  cyan: (s: string) => `\x1b[36m${s}\x1b[0m`,
-  green: (s: string) => `\x1b[32m${s}\x1b[0m`,
-  red: (s: string) => `\x1b[31m${s}\x1b[0m`,
-  yellow: (s: string) => `\x1b[33m${s}\x1b[0m`,
+  bold: (s: string) => pc.bold(s),
+  dim: (s: string) => pc.dim(s),
+  cyan: (s: string) => pc.cyan(s),
+  green: (s: string) => pc.green(s),
+  red: (s: string) => pc.red(s),
+  yellow: (s: string) => pc.yellow(s),
 };
 
 function readVersion(): string {
@@ -63,9 +97,9 @@ function readVersion(): string {
     const here = path.dirname(fileURLToPath(import.meta.url));
     const pkgPath = path.resolve(here, "..", "..", "package.json");
     const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as { version?: string };
-    return pkg.version ?? "0.0.0";
+    return pkg.version ?? "0.1.0";
   } catch {
-    return "0.0.0";
+    return "0.1.0";
   }
 }
 
@@ -142,45 +176,64 @@ function persistGlobal(name: string, value: string | undefined): void {
 
 function printBanner(session: SessionConfig): void {
   const info = describeProviderFromEnv(process.env, sessionOverrides(session));
-  console.log("");
-  console.log(`  ${c.bold(c.cyan("▲ Codeagent"))} ${c.dim(`v${readVersion()}`)}`);
-  console.log(`  ${c.dim(info.model)} · ${c.dim(info.kind === "openai-chat" ? "chat" : "responses")}${info.baseURL ? c.dim(` · ${info.baseURL}`) : ""}`);
-  console.log(`  ${c.dim(session.repoRoot)}`);
-  if (info.needsKey) {
-    console.log(`  ${c.yellow("Not configured · run /key <api-key> (no key needed for local Ollama)")}`);
-  }
-  console.log(c.dim("─".repeat(60)));
-  console.log(`  ${c.dim('Type a task, or "/help" for commands. Ctrl+C cancels a run.')} `);
-  console.log("");
+  renderBanner({
+    repoRoot: session.repoRoot,
+    model: info.model,
+    providerKind: info.kind,
+    baseURL: info.baseURL,
+    sessionId: session.activeSession?.id,
+    sessionTitle: session.activeSession?.title,
+    turnCount: session.activeSession?.turnCount ?? (session.history ? Math.floor(session.history.length / 2) : 0),
+    needsKey: info.needsKey,
+  });
 }
 
 function printHelp(): void {
   console.log(`
-  ${c.bold("Slash commands:")}
-    /help                 Show this help
-    /status               Show repo / provider / model / session settings
-    /key <api-key>        Save key globally (~/.codeagent/.env) — configure once
-    /key --local <k>      Save key to <repo>/.env (per-project override)
-    /model <id>           Switch model (e.g. /model openai/gpt-oss-20b)
-    /provider <name>      Switch backend: openai | chat
-    /endpoint <url>       Set OpenAI-compatible base URL (implies chat); "off" clears
-    /repo <path>          Switch repository root
-    /iterations <n>       Set max iterations for subsequent runs
-    /diff                 Show current git diff
-    /clear                Clear the screen
-    /exit, /quit          Leave codeagent
+  ${pc.bold(pc.cyan("Session & Workspace Commands:"))}
+    ${pc.cyan("/sessions")}               List and interactively select saved sessions
+    ${pc.cyan("/session resume <n|id>")}  Resume a past session by index or ID (alias: /resume <n>)
+    ${pc.cyan("/session new [title]")}    Start a fresh session (alias: /new)
+    ${pc.cyan("/session save [title]")}   Rename or checkpoint the current session
+    ${pc.cyan("/session delete <n|id>")}  Delete a saved session from disk
+    ${pc.cyan("/undo, /revert")}          Revert workspace files to state before last task run
+    ${pc.cyan("/checkpoints")}            List recorded turn checkpoints
+    ${pc.cyan("/repo <path>")}            Switch workspace repository root
+
+  ${pc.bold(pc.cyan("Model & API Configuration:"))}
+    ${pc.cyan("/model <id>")}             Switch model (e.g. /model openai/gpt-oss-20b)
+    ${pc.cyan("/provider <name>")}        Switch backend provider: openai | chat
+    ${pc.cyan("/endpoint <url>")}         Set OpenAI-compatible base URL (implies chat); "off" clears
+    ${pc.cyan("/key <api-key>")}          Save key globally (~/.codeagent/.env) — configure once
+    ${pc.cyan("/key --local <k>")}        Save key to <repo>/.env (per-project override)
+    ${pc.cyan("/sandbox [docker|local]")} Switch execution environment between Docker and local host
+    ${pc.cyan("/iterations <n>")}         Set max iterations for subsequent runs
+
+  ${pc.bold(pc.cyan("Context & Code Inspection:"))}
+    ${pc.cyan("/thought [on|off]")}       Toggle thinking display (or press Ctrl+T, alias: /t)
+    ${pc.cyan("/diff")}                   Show colorized git diff
+    ${pc.cyan("/compact")}                Compact conversation memory to reduce token usage
+    ${pc.cyan("/status")}                 Show repo / provider / model / session settings
+    ${pc.cyan("/clear")}                  Clear the screen and reset session conversation memory
+    ${pc.cyan("/help")}                   Show this help menu
+    ${pc.cyan("/exit, /quit")}            Leave codeagent
 `);
 }
 
 function printStatus(session: SessionConfig): void {
   const info = describeProviderFromEnv(process.env, sessionOverrides(session));
+  const turnCount = session.history && session.history.length > 0 ? Math.floor(session.history.length / 2) : 0;
   console.log(`
-  ${c.bold("Session:")}
-    repo ......... ${session.repoRoot}
-    provider ..... ${info.kind}${info.baseURL ? ` (${info.baseURL})` : ""}
-    model ........ ${info.model}
-    maxIterations  ${session.maxIterations}
-    api key ...... ${info.needsKey ? c.yellow("missing — run /key <api-key>") : c.green("configured")}
+  ${pc.bold(pc.cyan("Session Status"))}
+  ${pc.dim("─".repeat(45))}
+  ${pc.bold("ID:")}            ${session.activeSession?.id ? pc.cyan(session.activeSession.id) : pc.dim("none")}
+  ${pc.bold("Title:")}         ${session.activeSession?.title ? pc.white(session.activeSession.title) : pc.dim("none")}
+  ${pc.bold("Workspace:")}     ${session.repoRoot}
+  ${pc.bold("Provider:")}      ${pc.magenta(info.kind)}${info.baseURL ? pc.dim(` (${info.baseURL})`) : ""}
+  ${pc.bold("Model:")}         ${pc.yellow(info.model)}
+  ${pc.bold("Max Iter:")}      ${pc.white(String(session.maxIterations))}
+  ${pc.bold("API Key:")}       ${info.needsKey ? pc.yellow("missing — run /key <api-key>") : pc.green("configured")}
+  ${pc.bold("Context Memory:")} ${turnCount > 0 ? pc.green(`${turnCount} turn(s) in context`) : pc.dim("empty")}
 `);
 }
 
@@ -191,42 +244,209 @@ async function runTask(session: SessionConfig, task: string, signal: AbortSignal
     baseURL: session.baseURL,
     model: session.model,
   })) {
-    console.log(c.yellow(notice));
+    console.log(pc.yellow(notice));
   }
   let provider;
   try {
     provider = createProviderFromEnv(process.env, sessionOverrides(session));
   } catch (error) {
     if (error instanceof MissingApiKeyError) {
-      console.error(c.yellow(`\n${error.message}\n`));
+      console.error(pc.yellow(`\n${error.message}\n`));
       return;
     }
     throw error;
   }
   const { responder, info } = provider;
-  console.log(c.dim(`— ${info.model} · ${session.repoRoot} —`));
+  const reporter = new ConsoleAgentReporter(session.repoRoot, session.autoExpandThought);
   const agent = new Agent({
     repoRoot: session.repoRoot,
     model: info.model,
     maxIterations: session.maxIterations,
     responder,
+    permissions: session.permissions,
+    reporter,
   });
   try {
-    const result = await agent.run(task, { signal });
-    console.log(`\n${c.bold(c.green("=== RESULT ==="))}\n`);
-    console.log(result.finalMessage);
-    console.log(c.dim(`\niterations: ${result.iterations} · files: ${result.modifiedFiles.join(", ") || "(none)"}`));
+    const result = await agent.run(task, { signal, history: session.history });
+    if (result.history) {
+      session.history = compactHistory(result.history);
+    }
+    // Auto-save the active session on disk
+    if (session.activeSession) {
+      session.activeSession.turnCount++;
+      session.activeSession.history = session.history ?? [];
+      if (session.activeSession.title === "New session" || !session.activeSession.title) {
+        session.activeSession.title = task.slice(0, 60);
+      }
+      for (const f of result.modifiedFiles) {
+        if (!session.activeSession.modifiedFiles.includes(f)) {
+          session.activeSession.modifiedFiles.push(f);
+        }
+      }
+      session.activeSession.model = info.model;
+      session.activeSession.provider = session.provider;
+      session.activeSession.baseURL = session.baseURL;
+      saveSession(session.activeSession);
+    }
+
+    // Rich formatted assistant response
+    console.log("");
+    console.log(formatMarkdown(result.finalMessage));
+    console.log("");
+
+    const stats: string[] = [
+      `${pc.bold("iterations:")} ${pc.cyan(String(result.iterations))}`,
+      `${pc.bold("files:")} ${result.modifiedFiles.length > 0 ? pc.green(result.modifiedFiles.join(", ")) : pc.dim("(none)")}`,
+    ];
+    if (result.testResults && result.testResults.length > 0) {
+      const passed = result.testResults.filter((t) => t.exitCode === 0).length;
+      stats.push(`${pc.bold("tests:")} ${passed === result.testResults.length ? pc.green(`all ${passed} passed`) : pc.yellow(`${passed}/${result.testResults.length} passed`)}`);
+    }
+    console.log(pc.dim("─".repeat(50)));
+    console.log(`  ${stats.join(" · ")}`);
+    console.log("");
   } catch (error) {
+    reporter.stop();
     if (signal.aborted) {
-      console.log(c.yellow("\nRun cancelled."));
+      console.log(pc.yellow("\nRun cancelled."));
       return;
     }
-    console.error(c.red(`\nAgent failed: ${error instanceof Error ? error.message : error}`));
+    console.error(pc.red(`\nAgent failed: ${error instanceof Error ? error.message : error}`));
   }
+}
+
+
+export function handleSessionCommand(session: SessionConfig, subcmd: string, restArgs: string): void {
+  const op = subcmd.toLowerCase();
+  if (!op || op === "list") {
+    const list = listSessions(restArgs.includes("--all") ? undefined : session.repoRoot);
+    if (list.length === 0) {
+      console.log(c.dim("  No saved sessions found for this repository."));
+      return;
+    }
+    console.log(`\n  ${c.bold("Saved sessions:")}`);
+    list.forEach((s, idx) => {
+      const isActive = s.id === session.activeSession?.id;
+      const marker = isActive ? c.green(" [Active]") : "";
+      const age = c.dim(`(${formatTimeAgo(s.updatedAt)}, ${s.turnCount} turns)`);
+      console.log(`    ${c.bold(`${idx + 1}.`)} ${c.cyan(s.id)}${marker} ${age} - ${s.title}`);
+    });
+    console.log(c.dim("\n  Use /session resume <number | id> to resume a session.\n"));
+    return;
+  }
+
+  if (op === "resume") {
+    const target = restArgs.trim();
+    if (!target) {
+      console.log(c.dim("Usage: /session resume <number | session-id>"));
+      return;
+    }
+    const list = listSessions(session.repoRoot);
+    const num = Number(target);
+    let targetId = target;
+    if (!isNaN(num) && num >= 1 && num <= list.length) {
+      targetId = list[num - 1].id;
+    }
+    const loaded = loadSession(targetId);
+    if (!loaded) {
+      console.log(c.yellow(`Session not found: ${target}`));
+      return;
+    }
+    // Save current session first if it has turns or history
+    if (session.activeSession && (session.activeSession.turnCount > 0 || (session.history && session.history.length > 0))) {
+      session.activeSession.history = session.history ?? [];
+      saveSession(session.activeSession);
+    }
+    session.activeSession = loaded;
+    session.history = loaded.history ?? [];
+    if (loaded.model) session.model = loaded.model;
+    if (loaded.provider) session.provider = loaded.provider;
+    if (loaded.baseURL) session.baseURL = loaded.baseURL;
+    console.log(`Resumed session ${c.cyan(loaded.id)}: "${c.bold(loaded.title)}" (${c.green(`${Math.floor(session.history.length / 2)} turn(s)`)} in context).`);
+    return;
+  }
+
+  if (op === "new") {
+    if (session.activeSession && (session.activeSession.turnCount > 0 || (session.history && session.history.length > 0))) {
+      session.activeSession.history = session.history ?? [];
+      saveSession(session.activeSession);
+    }
+    session.activeSession = createSession(session.repoRoot, {
+      title: restArgs || "New session",
+      model: session.model,
+      provider: session.provider,
+      baseURL: session.baseURL,
+    });
+    session.history = [];
+    saveSession(session.activeSession);
+    console.log(`Started new session ${c.cyan(session.activeSession.id)}: "${c.bold(session.activeSession.title)}".`);
+    return;
+  }
+
+  if (op === "save") {
+    if (!session.activeSession) {
+      session.activeSession = createSession(session.repoRoot, { history: session.history ?? [] });
+    }
+    if (restArgs) {
+      session.activeSession.title = restArgs;
+    }
+    session.activeSession.history = session.history ?? [];
+    saveSession(session.activeSession);
+    console.log(`Saved session ${c.cyan(session.activeSession.id)}: "${c.bold(session.activeSession.title)}".`);
+    return;
+  }
+
+  if (op === "delete" || op === "del" || op === "rm") {
+    const target = restArgs.trim();
+    if (!target) {
+      console.log(c.dim("Usage: /session delete <number | session-id>"));
+      return;
+    }
+    const list = listSessions(session.repoRoot);
+    const num = Number(target);
+    let targetId = target;
+    if (!isNaN(num) && num >= 1 && num <= list.length) {
+      targetId = list[num - 1].id;
+    }
+    const success = deleteSession(targetId);
+    if (success) {
+      console.log(`Deleted session ${c.cyan(targetId)}.`);
+      if (session.activeSession?.id === targetId) {
+        session.activeSession = createSession(session.repoRoot);
+        session.history = [];
+        console.log(c.dim("Active session was deleted. Started new clean session."));
+      }
+    } else {
+      console.log(c.yellow(`Could not delete session: ${target}`));
+    }
+    return;
+  }
+
+  console.log(c.yellow(`Unknown session action '${subcmd}'. Try: /sessions, /session resume <n>, /session new, /session delete <n>`));
 }
 
 export async function startRepl(initial: SessionConfig): Promise<void> {
   const session: SessionConfig = { ...initial };
+  if (!session.activeSession) {
+    session.activeSession = createSession(session.repoRoot, {
+      model: session.model,
+      provider: session.provider,
+      baseURL: session.baseURL,
+      history: session.history ?? [],
+    });
+    if (session.history && session.history.length > 0) {
+      session.activeSession.turnCount = Math.floor(session.history.length / 2);
+    }
+  } else {
+    // If a session was passed in (e.g. via --resume)
+    session.history = session.activeSession.history ?? [];
+    if (session.activeSession.model && !session.model) session.model = session.activeSession.model;
+    if (session.activeSession.provider && !session.provider) session.provider = session.activeSession.provider;
+    if (session.activeSession.baseURL && !session.baseURL) session.baseURL = session.activeSession.baseURL;
+  }
+  if (!session.checkpoints) {
+    session.checkpoints = new CheckpointManager(session.repoRoot);
+  }
   // Heal keys saved before auto-detect existed (or pasted into .env by hand).
   const startupNotices = ensureEndpointForKey({
     provider: session.provider,
@@ -240,13 +460,52 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: c.bold("> "),
+    prompt: `${pc.bold(pc.cyan("▲"))} ${pc.bold(">")} `,
   });
   loadHistory(rl);
+
+  if (!session.permissions) {
+    session.permissions = new PermissionManager({
+      autoApprove: false,
+      handler: async (req) => {
+        rl.pause();
+        try {
+          const decision = await promptPermission(req.target);
+          if (decision === "always") {
+            const prefix = req.target.split(/\s+/)[0];
+            session.permissions?.allowPrefix(prefix);
+            console.log(pc.dim(`  ${icons.check} Allowed '${prefix}' commands for this session.`));
+            return true;
+          }
+          return decision === "yes";
+        } finally {
+          rl.resume();
+        }
+      },
+    });
+  }
 
   let running = false;
   let controller = new AbortController();
   let sigintCount = 0;
+  let thoughtExpanded = session.autoExpandThought ?? false;
+
+  const onKeypress = (_str: string, key: readline.Key) => {
+    if (running) return;
+    if (key && key.ctrl && (key.name === "t" || key.name === "o")) {
+      if (latestThought?.text) {
+        thoughtExpanded = !thoughtExpanded;
+        readline.cursorTo(process.stdout, 0);
+        readline.clearLine(process.stdout, 0);
+        console.log(`\n${formatThoughtLine(latestThought.durationMs, thoughtExpanded, latestThought.text)}\n`);
+        rl.prompt(true);
+      }
+    }
+  };
+
+  if (process.stdin.isTTY) {
+    process.stdin.on("keypress", onKeypress);
+  }
 
   // Manual SIGINT handling: cancel run first, exit only when idle.
   rl.on("SIGINT", () => {
@@ -257,6 +516,9 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
     }
     sigintCount++;
     if (sigintCount >= 2) {
+      if (process.stdin.isTTY) {
+        process.stdin.removeListener("keypress", onKeypress);
+      }
       console.log(c.dim("\nBye."));
       rl.close();
     } else {
@@ -369,13 +631,118 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
           break;
         case "diff":
           try {
-            console.log(await gitDiff(session.repoRoot));
+            const raw = await gitDiff(session.repoRoot);
+            console.log("");
+            console.log(formatDiff(raw));
+            console.log("");
           } catch (error) {
-            console.error(c.red(`git diff failed: ${error instanceof Error ? error.message : error}`));
+            console.error(pc.red(`git diff failed: ${error instanceof Error ? error.message : error}`));
           }
           break;
+        case "sandbox": {
+          const mode = args.toLowerCase().trim();
+          if (mode === "docker" || mode === "local") {
+            const res = await setSandboxMode(mode as "docker" | "local");
+            if (res.success) {
+              console.log(pc.green(`  ✔ ${res.message}`));
+            } else {
+              console.log(pc.yellow(`  ⚠️ ${res.message}`));
+            }
+          } else {
+            const current = getSandboxMode();
+            console.log(`  Current sandbox mode: ${c.cyan(current)} (options: /sandbox docker | /sandbox local)`);
+          }
+          break;
+        }
+        case "t":
+        case "thought":
+        case "thinking": {
+          const mode = args.toLowerCase().trim();
+          if (mode === "on" || mode === "always" || mode === "expand") {
+            session.autoExpandThought = true;
+            console.log(pc.green(`  ✔ Always expand thought is now ON.`));
+          } else if (mode === "off" || mode === "collapse") {
+            session.autoExpandThought = false;
+            console.log(pc.green(`  ✔ Always expand thought is now OFF.`));
+          } else {
+            if (latestThought?.text) {
+              thoughtExpanded = !thoughtExpanded;
+              console.log(`\n${formatThoughtLine(latestThought.durationMs, thoughtExpanded, latestThought.text)}\n`);
+            } else {
+              console.log(c.dim("  No thinking text recorded for the latest turn."));
+            }
+          }
+          break;
+        }
+        case "compact":
+          if (session.history && session.history.length > 0) {
+            const before = session.history.length;
+            session.history = compactHistory(session.history, { keepRecentToolOutputs: 1, aggressive: true });
+            console.log(`Compacted context memory (${c.cyan(`${before} items`)} → ${c.green(`${session.history.length} items`)}).`);
+          } else {
+            console.log(c.dim("Context memory is already compact / empty."));
+          }
+          break;
+        case "sessions":
+          handleSessionCommand(session, "list", args);
+          break;
+        case "session": {
+          const parts = args.trim().split(/\s+/);
+          const subcmd = parts[0] || "list";
+          const rest = parts.slice(1).join(" ");
+          handleSessionCommand(session, subcmd, rest);
+          break;
+        }
+        case "resume":
+          handleSessionCommand(session, "resume", args);
+          break;
+        case "new":
+          handleSessionCommand(session, "new", args);
+          break;
+        case "undo":
+        case "revert": {
+          if (!session.checkpoints) {
+            console.log(c.yellow("  No checkpoint manager available for this session."));
+            break;
+          }
+          const restored = await session.checkpoints.restoreLastCheckpoint();
+          if (restored) {
+            console.log(pc.green(`  ✔ Reverted workspace to checkpoint: "${restored.label}" (${restored.id})`));
+            const status = await gitStatus(session.repoRoot);
+            if (status && status !== "(clean)") {
+              console.log(c.dim("  git status:\n") + status.split("\n").map((l) => "    " + l).join("\n"));
+            } else {
+              console.log(c.dim("  Working tree is clean."));
+            }
+          } else {
+            console.log(c.yellow("  No checkpoints available to undo."));
+          }
+          break;
+        }
+        case "checkpoints": {
+          const list = session.checkpoints?.listCheckpoints() ?? [];
+          if (list.length === 0) {
+            console.log(c.dim("  No checkpoints saved yet in this session."));
+          } else {
+            console.log(pc.bold("\nSession Checkpoints:"));
+            list.forEach((cp, idx) => {
+              console.log(`  ${idx + 1}. ${c.cyan(cp.id)}: "${cp.label}" (${new Date(cp.timestamp).toLocaleTimeString()})`);
+            });
+            console.log(c.dim("\n  Type /undo to revert to the most recent checkpoint.\n"));
+          }
+          break;
+        }
         case "clear":
           console.clear();
+          session.history = [];
+          if (session.activeSession) {
+            session.activeSession = createSession(session.repoRoot, {
+              model: session.model,
+              provider: session.provider,
+              baseURL: session.baseURL,
+            });
+            saveSession(session.activeSession);
+          }
           printBanner(session);
           break;
         case "exit":
@@ -391,9 +758,16 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
       continue;
     }
 
-    // Plain text = a task. Await it so prompts don't interleave.
+    // Plain text = a task. Take a checkpoint before execution so the user can /undo if needed.
+    if (session.checkpoints) {
+      await session.checkpoints.saveCheckpoint(trimmed);
+    }
+
     running = true;
     controller = new AbortController();
+    // Show a styled user message block before the agent responds so it's
+    // visually clear which text is the user query vs agent output.
+    printUserMessage(trimmed);
     try {
       await runTask(session, trimmed, controller.signal);
     } finally {

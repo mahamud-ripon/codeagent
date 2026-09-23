@@ -30,21 +30,28 @@ export interface ResponsesCreateResult {
     content?: string;
   }>;
   output_text: string;
+  /** Extracted thinking / reasoning text from models that support it. */
+  reasoning_text?: string;
 }
 
-export type Responder = (input: unknown[]) => Promise<ResponsesCreateResult>;
+export interface ResponderOptions {
+  tools?: boolean;
+}
+
+export type Responder = (input: unknown[], options?: ResponderOptions) => Promise<ResponsesCreateResult>;
 
 export function createResponder(
   client: OpenAI,
   args: { model: string; instructions: string },
 ): Responder {
-  return async (input: unknown[]) => {
+  return async (input: unknown[], options?: ResponderOptions) => {
     const { tools } = await import("./tools.js");
+    const useTools = options?.tools ?? true;
     const response = await client.responses.create({
       model: args.model,
       instructions: args.instructions,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: tools as any,
+      tools: useTools ? (tools as any) : undefined,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       input: input as any,
     });

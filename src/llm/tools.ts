@@ -35,6 +35,50 @@ export const tools = [
   },
   {
     type: "function",
+    name: "view_file",
+    description:
+      "View a file with line numbers and optional start_line / end_line slicing. Preferred over read_file for large files.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Repository-relative file path." },
+        start_line: { type: "integer", description: "Optional 1-indexed starting line number." },
+        end_line: { type: "integer", description: "Optional 1-indexed ending line number." },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    type: "function",
+    name: "view_symbol_outline",
+    description:
+      "Extract a structural outline of symbols (classes, interfaces, methods, exported functions) from a code file with line numbers. Highly recommended for understanding large files without reading full contents.",
+    parameters: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "Repository-relative file path." },
+      },
+      required: ["path"],
+    },
+  },
+  {
+    type: "function",
+    name: "run_subagent",
+    description:
+      "Spawn a focused, read-only Explorer Subagent to research an architectural question, search across multiple files, or understand how logic is implemented without polluting the primary conversation history.",
+    parameters: {
+      type: "object",
+      properties: {
+        task: {
+          type: "string",
+          description: "Clear, specific research question or exploration goal for the subagent.",
+        },
+      },
+      required: ["task"],
+    },
+  },
+  {
+    type: "function",
     name: "write_file",
     description:
       "Create a new file or fully replace one. Prefer edit_file for modifications to existing files.",

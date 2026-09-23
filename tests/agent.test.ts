@@ -150,4 +150,148 @@ describe("agent loop", () => {
     const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 5, responder, verbose: false });
     await expect(agent.run("x", { signal: controller.signal })).rejects.toThrow(/cancelled/i);
   });
+
+  it("handles conversational inputs directly without tool execution", async () => {
+    let calls = 0;
+    const responder: Responder = async (input) => {
+      calls++;
+      // Verify no heavy repo context or task XML was injected for conversational
+      const userMessage = input[input.length - 1] as { role: string; content: string };
+      expect(userMessage.content).toBe("can you help me?");
+      return { output: [], output_text: "Sure! What would you like to work on?" };
+    };
+
+    const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 10, responder, verbose: false });
+    const result = await agent.run("can you help me?");
+
+    expect(calls).toBe(1);
+    expect(result.iterations).toBe(1);
+    expect(result.intent).toBe("conversational");
+    expect(result.modifiedFiles).toEqual([]);
+    expect(result.testResults).toEqual([]);
+    expect(result.finalMessage).toContain("What would you like to work on?");
+    expect(result.history).toBeDefined();
+  });
+
+  it("preserves conversation history across multi-turn interactions", async () => {
+    let turn = 0;
+    const responder: Responder = async (input) => {
+      turn++;
+      if (turn === 1) {
+        return { output: [], output_text: "Hello! Ready to help." };
+      }
+      if (turn === 2) {
+        // Second turn first call should contain the first turn's history
+        expect(input.length).toBeGreaterThan(2);
+        return {
+          output: [fc("c1", "edit_file", { path: "math.ts", old_text: "return a - b;", new_text: "return a + b;" })],
+          output_text: "",
+        };
+      }
+      // Finish turn 2
+      return { output: [], output_text: "Fixed." };
+    };
+
+    const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 10, responder, verbose: false });
+    const firstResult = await agent.run("hello");
+    expect(firstResult.intent).toBe("conversational");
+
+    const secondResult = await agent.run("fix add in math.ts", { history: firstResult.history });
+    expect(secondResult.intent).toBe("task");
+    expect(secondResult.modifiedFiles).toContain("math.ts");
+  });
+
+  it("does not wrap user requests in raw <task> XML tags and injects repo context cleanly", async () => {
+    let capturedInput: unknown[] = [];
+    const responder: Responder = async (input) => {
+      capturedInput = [...input];
+      return { output: [], output_text: "done" };
+    };
+
+    const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 5, responder, verbose: false });
+    await agent.run("explain how math.ts works");
+
+    const userMessage = capturedInput.find(
+      (item) => (item as { role?: string }).role === "user",
+    ) as { content: string };
+    const systemRepoMessage = capturedInput.find(
+      (item) => (item as { role?: string }).role === "system",
+    ) as { content: string };
+
+    expect(userMessage.content).not.toContain("<task>");
+    expect(userMessage.content).not.toContain("</task>");
+    expect(userMessage.content).toBe("explain how math.ts works");
+    expect(systemRepoMessage.content).toContain("<repository>");
+  });
+
+  it("passes model thinking / reasoning to reporter.onThinking", async () => {
+    let capturedThinking = "";
+    const mockReporter = {
+      onIterationStart: () => {},
+      onThinking: (thinking: string) => {
+        capturedThinking = thinking;
+      },
+      onToolStart: () => {},
+      onToolComplete: () => {},
+      onProgressMessage: () => {},
+      onError: () => {},
+      stop: () => {},
+    };
+
+    const responder: Responder = async () => {
+      return {
+        output: [],
+        output_text: "Done with explanation",
+        reasoning_text: "Thinking about the architecture of math.ts",
+      };
+    };
+
+    const agent = new Agent({
+      repoRoot: tmp,
+      model: "test",
+      maxIterations: 5,
+      responder,
+      reporter: mockReporter,
+      verbose: false,
+    });
+
+    await agent.run("explain math.ts");
+    expect(capturedThinking).toBe("Thinking about the architecture of math.ts");
+  });
+
+  it("executes consecutive read-only tools in parallel", async () => {
+    await writeFile(tmp, "util.ts", "export const PI = 3.14;\n");
+    let turn = 0;
+    const responder: Responder = async () => {
+      turn++;
+      if (turn === 1) {
+        return {
+          output: [
+            fc("c1", "read_file", { path: "math.ts" }),
+            fc("c2", "read_file", { path: "util.ts" }),
+          ],
+          output_text: "",
+        };
+      }
+      return {
+        output: [],
+        output_text: "Read both files successfully.",
+      };
+    };
+
+    const agent = new Agent({
+      repoRoot: tmp,
+      model: "test",
+      maxIterations: 5,
+      responder,
+      verbose: false,
+    });
+
+    const res = await agent.run("Read math.ts and util.ts");
+    expect(res.finalMessage).toBe("Read both files successfully.");
+    expect(res.history.some((item) => (item as { call_id?: string }).call_id === "c1")).toBe(true);
+    expect(res.history.some((item) => (item as { call_id?: string }).call_id === "c2")).toBe(true);
+  });
 });
+
+

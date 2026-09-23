@@ -1,6 +1,6 @@
 import type OpenAI from "openai";
 import { toChatTools } from "./tools.js";
-import type { ResponsesCreateResult, Responder } from "./client.js";
+import type { ResponsesCreateResult, Responder, ResponderOptions } from "./client.js";
 
 /**
  * Chat Completions provider — the free-model route.
@@ -27,6 +27,9 @@ export interface MinimalChatClient {
         choices: Array<{
           message: {
             content?: string | null;
+            reasoning_content?: string | null;
+            reasoning?: string | null;
+            thought?: string | null;
             tool_calls?: Array<{
               id: string;
               type?: string;
@@ -138,26 +141,89 @@ export function responsesHistoryToChatMessages(input: unknown[]): ChatMessage[] 
   return messages;
 }
 
+/**
+ * Extracts model thinking / reasoning text from a chat response message.
+ * Supports:
+ * - message.reasoning_content (DeepSeek-R1, Groq, Ollama, OpenRouter, vLLM)
+ * - message.reasoning (OpenRouter, Together)
+ * - message.thought (Gemini compat)
+ * - <think>...</think>, <thought>...</thought>, <thinking>...</thinking> tags inside content
+ * - Text generated alongside tool_calls (represents the model's rationale before tool execution)
+ */
+export function extractThinking(msg: {
+  content?: string | null;
+  reasoning_content?: string | null;
+  reasoning?: string | null;
+  thought?: string | null;
+  tool_calls?: unknown[];
+}): { content: string; thinking?: string } {
+  const parts: string[] = [];
+  let content = msg.content ?? "";
+
+  // 1. Direct reasoning fields
+  if (typeof msg.reasoning_content === "string" && msg.reasoning_content.trim()) {
+    parts.push(msg.reasoning_content.trim());
+  }
+  if (typeof msg.reasoning === "string" && msg.reasoning.trim()) {
+    parts.push(msg.reasoning.trim());
+  }
+  if (typeof msg.thought === "string" && msg.thought.trim()) {
+    parts.push(msg.thought.trim());
+  }
+
+  // 2. Extract <think>...</think>, <thought>...</thought>, or <thinking>...</thinking>
+  const thinkRegex = /<(think|thought|thinking)>([\s\S]*?)<\/\1>/gi;
+  let match: RegExpExecArray | null;
+  while ((match = thinkRegex.exec(content)) !== null) {
+    if (match[2].trim()) {
+      parts.push(match[2].trim());
+    }
+  }
+  content = content.replace(thinkRegex, "").trim();
+
+  // 3. Handle unclosed <think> tag (in case of stream cutoff)
+  const unclosedThink = /<(think|thought|thinking)>([\s\S]*)$/i;
+  const unclosedMatch = unclosedThink.exec(content);
+  if (unclosedMatch) {
+    if (unclosedMatch[2].trim()) {
+      parts.push(unclosedMatch[2].trim());
+    }
+    content = content.replace(unclosedThink, "").trim();
+  }
+
+  // 4. If tools are called and content has text, that text is the model's pre-tool thought
+  if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0 && content) {
+    parts.push(content);
+  }
+
+  const thinking = parts.join("\n\n").trim();
+  return {
+    content,
+    thinking: thinking || undefined,
+  };
+}
+
 export function createChatResponder(
   client: MinimalChatClient,
   args: { model: string; systemPrompt: string },
 ): Responder {
-  return async (input: unknown[]) => {
+  return async (input: unknown[], options?: ResponderOptions) => {
     const messages: ChatMessage[] = [
       { role: "system", content: args.systemPrompt },
       ...responsesHistoryToChatMessages(input),
     ];
 
+    const useTools = options?.tools ?? true;
     const completion = await client.chat.completions.create({
       model: args.model,
       messages,
-      tools: toChatTools() as unknown as ChatTool[],
+      ...(useTools ? { tools: toChatTools() as unknown as ChatTool[] } : {}),
     });
 
     const msg = completion.choices[0]?.message;
     if (!msg) throw new Error("Chat provider returned no choices.");
 
-    const text = msg.content ?? "";
+    const { content: text, thinking } = extractThinking(msg);
     const output: ResponsesCreateResult["output"] = [];
     if (text) output.push({ type: "message", content: text });
     for (const tc of msg.tool_calls ?? []) {
@@ -168,6 +234,6 @@ export function createChatResponder(
         arguments: tc.function.arguments,
       });
     }
-    return { output, output_text: text };
+    return { output, output_text: text, reasoning_text: thinking };
   };
 }

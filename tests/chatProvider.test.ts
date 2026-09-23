@@ -8,13 +8,16 @@ import { createProviderFromEnv } from "../src/llm/provider.js";
 import { toChatTools } from "../src/llm/tools.js";
 
 describe("toChatTools", () => {
-  it("converts all 8 tools to chat shape", () => {
+  it("converts all 11 tools to chat shape", () => {
     const chat = toChatTools();
-    expect(chat).toHaveLength(8);
+    expect(chat).toHaveLength(11);
     expect(chat[0]).toMatchObject({
       type: "function",
       function: { name: "list_files" },
     });
+    expect(chat.some((t) => t.function.name === "view_file")).toBe(true);
+    expect(chat.some((t) => t.function.name === "view_symbol_outline")).toBe(true);
+    expect(chat.some((t) => t.function.name === "run_subagent")).toBe(true);
   });
 });
 
@@ -48,18 +51,7 @@ describe("responsesHistoryToChatMessages", () => {
 });
 
 describe("createChatResponder", () => {
-  type ChatReply = {
-    choices: Array<{
-      message: {
-        content?: string | null;
-        tool_calls?: Array<{
-          id: string;
-          type?: string;
-          function: { name: string; arguments: string };
-        }>;
-      };
-    }>;
-  };
+  type ChatReply = Awaited<ReturnType<MinimalChatClient["chat"]["completions"]["create"]>>;
   function fakeClient(reply: ChatReply): MinimalChatClient {
     return { chat: { completions: { create: async () => reply } } };
   }
@@ -107,6 +99,24 @@ describe("createChatResponder", () => {
     expect(history).toHaveLength(1);
     expect(seen[0]).toMatchObject({ role: "system", content: "SYS" });
     expect(seen[1]).toMatchObject({ role: "user" });
+  });
+
+  it("extracts reasoning_content and <think> tags as thinking text", async () => {
+    const client = fakeClient({
+      choices: [
+        {
+          message: {
+            content: "<think>Plan the fix</think>Here is the fix",
+            reasoning_content: "DeepSeek model thoughts",
+          },
+        },
+      ],
+    });
+    const respond = createChatResponder(client, { model: "deepseek-r1", systemPrompt: "SYS" });
+    const result = await respond([{ role: "user", content: "hi" }]);
+    expect(result.output_text).toBe("Here is the fix");
+    expect(result.reasoning_text).toContain("DeepSeek model thoughts");
+    expect(result.reasoning_text).toContain("Plan the fix");
   });
 });
 

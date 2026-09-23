@@ -3,6 +3,7 @@ import path from "node:path";
 import { resolveInsideRepo } from "../utils/paths.js";
 import { TRUNCATION_BUDGETS, truncate } from "../utils/truncate.js";
 import { isIgnoredDir, isSecretPath } from "../repo/ignore.js";
+import { applyMultiStrategyPatch, validateSyntaxPreFlight } from "./patch.js";
 
 const MAX_LIST_FILES = 5000;
 
@@ -80,6 +81,57 @@ export async function readFile(repoRoot: string, filePath: string): Promise<stri
   return truncate(content, TRUNCATION_BUDGETS.fileRead);
 }
 
+export interface ViewFileOptions {
+  startLine?: number;
+  endLine?: number;
+}
+
+export async function viewFile(
+  repoRoot: string,
+  filePath: string,
+  options?: ViewFileOptions,
+): Promise<string> {
+  assertNotSecret(filePath);
+  const absolute = resolveInsideRepo(repoRoot, filePath);
+
+  let stat;
+  try {
+    stat = await fs.stat(absolute);
+  } catch {
+    throw new Error(`File not found: ${filePath}`);
+  }
+  if (!stat.isFile()) {
+    throw new Error(`${filePath} is not a file`);
+  }
+  if (stat.size > 2_000_000) {
+    throw new Error(
+      `${filePath} is too large (${stat.size} bytes). Refine your approach or view specific line ranges.`,
+    );
+  }
+
+  const raw = await fs.readFile(absolute, "utf8");
+  const lines = raw.split(/\r?\n/);
+  const total = lines.length;
+
+  const start = Math.max(1, options?.startLine ?? 1);
+  const end = Math.min(total, options?.endLine ?? total);
+
+  if (start > total) {
+    return `[File: ${filePath} (${total} total lines)] (start_line ${start} is beyond end of file)`;
+  }
+
+  const selected = lines.slice(start - 1, end);
+  const maxLineDigits = String(end).length;
+
+  const numbered = selected.map((line, idx) => {
+    const lineNum = String(start + idx).padStart(maxLineDigits, " ");
+    return `${lineNum} | ${line}`;
+  });
+
+  const header = `[File: ${filePath} (lines ${start}-${end} of ${total})]`;
+  return `${header}\n${numbered.join("\n")}`;
+}
+
 export async function writeFile(
   repoRoot: string,
   filePath: string,
@@ -89,6 +141,7 @@ export async function writeFile(
   if (content.length > 500_000) {
     throw new Error("Content too large (500k char limit). Write smaller files.");
   }
+  validateSyntaxPreFlight(content, filePath);
   const absolute = resolveInsideRepo(repoRoot, filePath);
   await fs.mkdir(path.dirname(absolute), { recursive: true });
   await fs.writeFile(absolute, content, "utf8");
@@ -102,7 +155,6 @@ export async function editFile(
   newText: string,
 ): Promise<string> {
   assertNotSecret(filePath);
-  if (!oldText) throw new Error("old_text must be non-empty");
   const absolute = resolveInsideRepo(repoRoot, filePath);
 
   let content: string;
@@ -112,17 +164,7 @@ export async function editFile(
     throw new Error(`File not found: ${filePath}`);
   }
 
-  const occurrences = content.split(oldText).length - 1;
-  if (occurrences === 0) {
-    throw new Error("old_text was not found in the file. Read the file first and copy the exact snippet.");
-  }
-  if (occurrences > 1) {
-    throw new Error(
-      `old_text matched ${occurrences} times. Provide a longer, more specific snippet so the edit is unambiguous.`,
-    );
-  }
-
-  const updated = content.replace(oldText, newText);
+  const { updated, strategy } = applyMultiStrategyPatch(content, oldText, newText, filePath);
   await fs.writeFile(absolute, updated, "utf8");
-  return `Edited ${filePath}`;
+  return `Edited ${filePath} (strategy: ${strategy})`;
 }
