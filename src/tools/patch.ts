@@ -130,14 +130,14 @@ export function validateSyntaxPreFlight(content: string, filePath?: string): voi
       throw new Error(`Pre-flight JSON syntax validation failed: ${err instanceof Error ? err.message : String(err)}`);
     }
   } else if (ext === "ts" || ext === "tsx" || ext === "js" || ext === "jsx") {
-    // Quick bracket & quote parity check ignoring strings & comments
     const stack: { char: string; line: number }[] = [];
     const lines = content.split("\n");
     let inBlockComment = false;
+    let inTemplateString = false;
 
     for (let lineNum = 1; lineNum <= lines.length; lineNum++) {
       const line = lines[lineNum - 1];
-      let inString: string | null = null;
+      let inSingleOrDouble: string | null = null;
       let escape = false;
 
       for (let c = 0; c < line.length; c++) {
@@ -152,30 +152,43 @@ export function validateSyntaxPreFlight(content: string, filePath?: string): voi
           continue;
         }
 
-        if (!inString && char === "/" && nextChar === "*") {
-          inBlockComment = true;
-          c++;
-          continue;
-        }
-
-        if (!inString && char === "/" && nextChar === "/") {
-          // Line comment -> rest of line ignored
-          break;
-        }
-
-        if (inString) {
+        if (inTemplateString) {
           if (escape) {
             escape = false;
           } else if (char === "\\") {
             escape = true;
-          } else if (char === inString) {
-            inString = null;
+          } else if (char === "`") {
+            inTemplateString = false;
           }
           continue;
         }
 
-        if (char === "'" || char === '"' || char === "`") {
-          inString = char;
+        if (inSingleOrDouble) {
+          if (escape) {
+            escape = false;
+          } else if (char === "\\") {
+            escape = true;
+          } else if (char === inSingleOrDouble) {
+            inSingleOrDouble = null;
+          }
+          continue;
+        }
+
+        if (char === "/" && nextChar === "*") {
+          inBlockComment = true;
+          c++;
+          continue;
+        }
+        if (char === "/" && nextChar === "/") {
+          break;
+        }
+
+        if (char === "`") {
+          inTemplateString = true;
+          continue;
+        }
+        if (char === "'" || char === '"') {
+          inSingleOrDouble = char;
           continue;
         }
 

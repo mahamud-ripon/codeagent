@@ -1,12 +1,15 @@
 import { isCancel, select } from "@clack/prompts";
 import { type SessionRecord } from "../../session/sessionManager.js";
-import { colors, icons, pc } from "./theme.js";
+import { icons, pc } from "./theme.js";
 
 export type PermissionDecision = "yes" | "always" | "no";
 
 /**
  * Interactive arrow-key permission prompt for command execution.
- * Falls back safely to false if cancelled or if stdin is non-interactive.
+ * Fails OPEN when stdin is non-interactive (piped / CI): returns "yes" so
+ * autonomous one-shot and scripted runs are not blocked. This matches the
+ * Agent's default `autoApprove` behavior when no PermissionManager is
+ * provided. Cancellation (Ctrl+C) maps to "no".
  */
 export async function promptPermission(
   command: string,

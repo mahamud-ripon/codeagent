@@ -1,4 +1,4 @@
-import { colors, icons, pc } from "./theme.js";
+import { pc } from "./theme.js";
 
 /**
  * Format markdown text for rich display in the terminal with ANSI colors.
@@ -12,6 +12,20 @@ export function formatMarkdown(text: string): string {
   let codeBlockLang = "";
   let codeBlockLines: string[] = [];
 
+  // Frame width adapts to the terminal (capped at 80, floored at 40).
+  const frameWidth = Math.max(40, Math.min(process.stdout.columns || 80, 80));
+  const renderCodeBlock = (lang: string, blockLines: string[]): string[] => {
+    const header =
+      pc.dim(`╭── ${pc.bold(pc.cyan(lang))} `) +
+      pc.dim("─".repeat(Math.max(3, frameWidth - 5 - lang.length)));
+    const out = [header];
+    for (const cl of blockLines) {
+      out.push(`${pc.dim("│")}  ${highlightCodeLine(cl, lang)}`);
+    }
+    out.push(pc.dim("╰" + "─".repeat(frameWidth - 1)));
+    return out;
+  };
+
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
 
@@ -24,13 +38,7 @@ export function formatMarkdown(text: string): string {
         continue;
       } else {
         inCodeBlock = false;
-        // Render framed code block
-        const header = pc.dim(`╭── ${pc.bold(pc.cyan(codeBlockLang))} `) + pc.dim("─".repeat(Math.max(10, 50 - codeBlockLang.length)));
-        formatted.push(header);
-        for (const cl of codeBlockLines) {
-          formatted.push(`${pc.dim("│")}  ${highlightCodeLine(cl, codeBlockLang)}`);
-        }
-        formatted.push(pc.dim("╰" + "─".repeat(55)));
+        formatted.push(...renderCodeBlock(codeBlockLang, codeBlockLines));
         continue;
       }
     }
@@ -92,12 +100,7 @@ export function formatMarkdown(text: string): string {
 
   // Handle unclosed code block if response was truncated
   if (inCodeBlock && codeBlockLines.length > 0) {
-    const header = pc.dim(`╭── ${pc.bold(pc.cyan(codeBlockLang))} `) + pc.dim("─".repeat(Math.max(10, 50 - codeBlockLang.length)));
-    formatted.push(header);
-    for (const cl of codeBlockLines) {
-      formatted.push(`${pc.dim("│")}  ${highlightCodeLine(cl, codeBlockLang)}`);
-    }
-    formatted.push(pc.dim("╰" + "─".repeat(55)));
+    formatted.push(...renderCodeBlock(codeBlockLang, codeBlockLines));
   }
 
   return formatted.join("\n");
@@ -128,19 +131,26 @@ function highlightCodeLine(line: string, _lang: string): string {
     return pc.dim(line);
   }
 
-  // Strings (quoted)
-  let highlighted = line.replace(/(["'`])(?:(?=(\\?))\2.)*?\1/g, (m) => pc.green(m));
+  // Strings (quoted): mask them with placeholders so the keyword pass
+  // below never recolors keywords that appear inside string literals.
+  const stringTokens: string[] = [];
+  let highlighted = line.replace(/(["'`])(?:(?=(\\?))\2.)*?\1/g, (m) => {
+    stringTokens.push(pc.green(m));
+    return `\u0000${stringTokens.length - 1}\u0000`;
+  });
 
   // Common keywords
   const keywords = [
     "const", "let", "var", "function", "return", "import", "export", "from",
     "if", "else", "switch", "case", "for", "while", "class", "extends",
     "async", "await", "try", "catch", "throw", "new", "type", "interface",
-    "def", "self", "None", "True", "False", "import", "as",
+    "def", "self", "None", "True", "False", "as",
   ];
   const kwRegex = new RegExp(`\\b(${keywords.join("|")})\\b`, "g");
   highlighted = highlighted.replace(kwRegex, (m) => pc.magenta(m));
 
+  // Restore the green string literals.
+  highlighted = highlighted.replace(/\u0000(\d+)\u0000/g, (_, i: string) => stringTokens[Number(i)]);
   return highlighted;
 }
 

@@ -1,5 +1,13 @@
 import { truncate } from "../utils/truncate.js";
 
+/**
+ * Standard Claude Code micro-compaction replacement string:
+ * When tool results get old or large, instead of blowing up the context window
+ * or breaking the message history chain, the bulky body is replaced with this marker.
+ */
+export const OLD_TOOL_RESULT_CLEARED = "[Old tool result content cleared]";
+export const TIME_BASED_MC_CLEARED_MESSAGE = OLD_TOOL_RESULT_CLEARED;
+
 export interface CompactorOptions {
   /** Number of most recent tool outputs to keep uncompressed (default: 6). */
   keepRecentToolOutputs?: number;
@@ -9,6 +17,8 @@ export interface CompactorOptions {
   aggressive?: boolean;
   /** If true, prune tool outputs only and never touch conversation dialogue. */
   pruneToolsOnly?: boolean;
+  /** If true, uses Claude Code's exact [Old tool result content cleared] marker. */
+  useClearedMarker?: boolean;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -22,6 +32,39 @@ function estimateSize(item: unknown): number {
   if (typeof item.output === "string") total += item.output.length;
   if (typeof item.arguments === "string") total += item.arguments.length;
   return total;
+}
+
+/**
+ * Replaces older bulky tool outputs with Claude Code's standard:
+ * `[Old tool result content cleared]`
+ * preserving the tool calls, function call ids, and arguments.
+ */
+export function microCompactToolResults(
+  input: unknown[],
+  options?: { keepRecent?: number; placeholder?: string },
+): unknown[] {
+  if (!input || input.length <= 2) return input;
+  const keepRecent = options?.keepRecent ?? 4;
+  const placeholder = options?.placeholder ?? OLD_TOOL_RESULT_CLEARED;
+
+  const result: unknown[] = input.map((item) => (isRecord(item) ? { ...item } : item));
+  const toolOutputIndices: number[] = [];
+
+  for (let i = 0; i < result.length; i++) {
+    const item = result[i];
+    if (isRecord(item) && item.type === "function_call_output") {
+      toolOutputIndices.push(i);
+    }
+  }
+
+  const pruneCount = Math.max(0, toolOutputIndices.length - keepRecent);
+  for (let k = 0; k < pruneCount; k++) {
+    const idx = toolOutputIndices[k];
+    const item = result[idx] as Record<string, unknown>;
+    item.output = placeholder;
+  }
+
+  return result;
 }
 
 /**
@@ -91,7 +134,9 @@ export function compactHistory(
     const lines = rawOutput.split("\n").length;
     const chars = rawOutput.length;
 
-    if (aggressive) {
+    if (options?.useClearedMarker) {
+      item.output = OLD_TOOL_RESULT_CLEARED;
+    } else if (aggressive) {
       item.output = `[Output of ${toolName}${detail} (${lines} lines, ${chars} chars) pruned for brevity]`;
     } else if (chars > 400) {
       const preview = truncate(rawOutput, 250);

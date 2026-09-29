@@ -44,11 +44,14 @@ codeagent "Add pagination to GET /users." --model openai/gpt-oss-20b
 
 | Flag | Description | Default |
 |---|---|---|
+| `--repo <path>` | Repository root | Current working directory |
 | `-m, --model <id>` | Model identifier (e.g. `openai/gpt-oss-20b`, `gemini-2.0-flash`) | Provider default |
-| `-p, --provider <name>` | LLM backend: `openai` or `chat` | Auto-detected |
-| `-e, --endpoint <url>` | Custom OpenAI-compatible base URL | From environment |
-| `-i, --iterations <n>` | Maximum agent iterations per task | `25` |
+| `-p, --provider <name>` | LLM backend: `openai` (Responses) or `chat` (Completions) | Auto-detected |
+| `-e, --endpoint <url>` | Custom OpenAI-compatible base URL (implies `chat` provider) | From environment |
+| `-i, --iterations <n>` | Maximum agent iterations per task (alias: `--max-iterations`) | `30` (or `$MAX_ITERATIONS`) |
 | `-s, --sandbox <mode>` | Execution environment: `docker` or `local` | `local` |
+| `-r, --resume [id]` | Resume latest session (or by session ID / list index) | |
+| `--sessions` | List saved sessions for this repository and exit | |
 | `-h, --help` | Display command-line help | |
 
 ---
@@ -58,13 +61,15 @@ codeagent "Add pagination to GET /users." --model openai/gpt-oss-20b
 Type `codeagent` without a task to enter the interactive REPL.
 
 ```text
-▲ codeagent v0.1.0
-Repo:     /workspace/my-app
-Provider: openai (https://api.openai.com/v1)
-Model:    gpt-4o
-Sandbox:  local (use /sandbox docker to isolate)
+╭──────────────────────────────────────────────────────────────╮
+ │ ▲ CODEAGENT v0.1.0   ● Ready                                  │
+ │                                                               │
+ │   Workspace:  /workspace/my-app (⎇ main)                      │
+ │   Model:      gpt-4o                                          │
+ │   Sandbox:    local (use /sandbox docker to isolate)          │
+ ╰──────────────────────────────────────────────────────────────╯
 
-Type your task or /help for commands. Press Ctrl+C to cancel, Ctrl+D to exit.
+Type your task, or "/help" for commands · Ctrl+C cancels
 ```
 
 ### Slash Commands
@@ -83,6 +88,13 @@ Type your task or /help for commands. Press Ctrl+C to cancel, Ctrl+D to exit.
 - `/sandbox [docker|local]` — Toggle command execution between containerized Docker isolation and local execution.
 - `/iterations <n>` — Set maximum agent turn iterations for subsequent tasks.
 
+#### Planning & Tasks
+- `/plan [on|off]` — Toggle Dual-Phase Plan Mode (locks modifications for read-only exploration).
+- `/todos`, `/tasks` — Display the live task list; `toggle` switches between expanded and compact footer views (or press `Ctrl+T`).
+- `/worktree create <slug>` — Create and switch to an isolated Git worktree sandbox.
+- `/worktree main` — Return to the main repository from a worktree.
+- `/worktree status` — Show current workspace isolation state.
+
 #### Model & Backend Configuration
 - `/model <id>` — Switch LLM model on-the-fly (e.g. `/model openai/gpt-oss-20b`).
 - `/provider <name>` — Switch backend provider: `openai` (Responses API) or `chat` (Chat Completions).
@@ -91,7 +103,7 @@ Type your task or /help for commands. Press Ctrl+C to cancel, Ctrl+D to exit.
 - `/key --local <api-key>` — Save API key to `<repo>/.env` (per-project override).
 
 #### Context & Inspection
-- `/thought [on|off]` (alias: `/t`, or press `Ctrl+T`) — Toggle display of LLM reasoning / thinking blocks.
+- `/thought [on|off]` (alias: `/t`, or press `Ctrl+O`) — Toggle display of LLM reasoning / thinking blocks.
 - `/diff` — Display colorized Git diff of current uncommitted changes.
 - `/compact` — Trigger tiered conversation memory compaction to trim token usage.
 - `/status` — Display active repository, provider, model, sandbox mode, and session details.
@@ -239,6 +251,7 @@ MODEL=qwen/qwen3-coder:free
 
 - **Path Escape Protection**: All file paths are strictly resolved via `resolveInsideRepo`, preventing `../` directory traversal.
 - **Secret Shield**: Refuses access to `.env`, private keys (`*.pem`, `id_rsa`), AWS credentials, and sensitive configurations.
+- **Non-Interactive Auto-Approval**: When stdin is not a TTY (piped input, CI pipelines), interactive permission prompts fail open — commands are auto-approved, matching the autonomous one-shot default (`PermissionManager` with `autoApprove`). In interactive REPL sessions, commands prompt for approval unless you choose "Always allow" for a prefix.
 - **Destructive Command Blocker**: Blocks dangerous shell patterns (`sudo`, `rm -rf /`, `mkfs`, fork bombs, etc.).
 - **Docker Container Isolation**: Restricts container execution with isolated volumes, 2GB memory ceilings, and 2-CPU limits.
 - **Environment Isolation**: Local environment variables are never transmitted to LLM providers; only truncated command outputs are shared.
@@ -251,7 +264,7 @@ MODEL=qwen/qwen3-coder:free
 # Type-check TypeScript codebase
 npm run typecheck
 
-# Run full automated test suite (17 test files, 116 tests)
+# Run full automated test suite (21 test files, 198 tests)
 npm test
 
 # Build production bundle

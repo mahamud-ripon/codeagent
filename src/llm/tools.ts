@@ -24,7 +24,7 @@ export const tools = [
     type: "function",
     name: "read_file",
     description:
-      "Read a repo-relative text file. ALWAYS read a file before editing it. Never guess contents.",
+      "Read a repo-relative text file. ALWAYS read a file before editing it. Never guess contents. Text only: binary, image, and media files are rejected — you cannot view them.",
     parameters: {
       type: "object",
       properties: {
@@ -37,7 +37,7 @@ export const tools = [
     type: "function",
     name: "view_file",
     description:
-      "View a file with line numbers and optional start_line / end_line slicing. Preferred over read_file for large files.",
+      "View a file with line numbers and optional start_line / end_line slicing. Preferred over read_file for large files. Text only: binary, image, and media files are rejected — you cannot view them.",
     parameters: {
       type: "object",
       properties: {
@@ -65,13 +65,18 @@ export const tools = [
     type: "function",
     name: "run_subagent",
     description:
-      "Spawn a focused, read-only Explorer Subagent to research an architectural question, search across multiple files, or understand how logic is implemented without polluting the primary conversation history.",
+      "Spawn a focused, read-only subagent to explore codebases or design architectural plans without polluting the primary conversation history. Supports subagent_type: 'explore' (fast code search and findings) or 'plan' (software architecture and implementation planning).",
     parameters: {
       type: "object",
       properties: {
         task: {
           type: "string",
-          description: "Clear, specific research question or exploration goal for the subagent.",
+          description: "Clear, specific research question, exploration goal, or planning task for the subagent.",
+        },
+        subagent_type: {
+          type: "string",
+          enum: ["explore", "plan"],
+          description: "Subagent persona: 'explore' for search and code investigation (default), 'plan' for architectural planning.",
         },
       },
       required: ["task"],
@@ -144,6 +149,65 @@ export const tools = [
     description:
       "Show current uncommitted git diff. ALWAYS inspect before finishing.",
     parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    type: "function",
+    name: "todo_write",
+    description:
+      "Update the todo list for the current session. To be used proactively and often to track progress and pending tasks. Make sure that at least one task is in_progress at all times. Always provide both content (imperative) and activeForm (present continuous) for each task.",
+    parameters: {
+      type: "object",
+      properties: {
+        todos: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              id: { type: "string", description: "Optional unique task identifier." },
+              content: {
+                type: "string",
+                description: "The imperative form describing what needs to be done (e.g., 'Run tests', 'Build the project').",
+              },
+              status: {
+                type: "string",
+                enum: ["pending", "in_progress", "completed"],
+                description: "The current state of the task (pending, in_progress, completed).",
+              },
+              activeForm: {
+                type: "string",
+                description: "The present continuous form shown during execution (e.g., 'Running tests', 'Building the project').",
+              },
+            },
+            required: ["content", "status", "activeForm"],
+          },
+          description: "The updated todo list.",
+        },
+      },
+      required: ["todos"],
+    },
+  },
+  {
+    type: "function",
+    name: "enter_plan_mode",
+    description:
+      "Enter Plan Mode for non-trivial tasks or ambiguous architectures. Locks file mutations so you can safely explore and formulate a plan before writing code.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
+  {
+    type: "function",
+    name: "exit_plan_mode",
+    description:
+      "Exit Plan Mode once your architecture plan is ready. Unlocks file editing and implementation tools.",
+    parameters: {
+      type: "object",
+      properties: {
+        plan_summary: {
+          type: "string",
+          description: "Summary of the agreed implementation plan.",
+        },
+      },
+      required: [],
+    },
   },
 ] as const;
 

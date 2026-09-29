@@ -2,7 +2,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import readline from "node:readline";
-import { fileURLToPath } from "node:url";
 import { Agent } from "../agent/agent.js";
 import {
   createProviderFromEnv,
@@ -44,11 +43,18 @@ import {
   promptSessionSelect,
   printUserMessage,
   formatThoughtLine,
+  formatTurnCompletionLine,
+  renderJumpToBottomBadge,
+  renderStatusDock,
   latestThought,
   pc,
   icons,
-  colors,
 } from "./ui/index.js";
+import { TodoManager } from "../agent/todo.js";
+import { PlanModeManager } from "../agent/planMode.js";
+import { FileStateCache } from "../tools/fileStateCache.js";
+import { createWorktree, hasWorktreeModifications, resolveMainRootFromWorktree } from "../tools/worktree.js";
+import { renderTodoList } from "./ui/reporter.js";
 
 export interface SessionConfig {
   repoRoot: string;
@@ -61,6 +67,20 @@ export interface SessionConfig {
   checkpoints?: CheckpointManager;
   activeSession?: SessionRecord;
   autoExpandThought?: boolean;
+  todoManager?: TodoManager;
+  planModeManager?: PlanModeManager;
+  fileStateCache?: FileStateCache;
+  isWorktree?: boolean;
+  /** Original repository root, captured before switching into an isolated worktree. */
+  mainRepoRoot?: string;
+  /** Reference to the reporter of the currently running task (for live view toggles). */
+  activeReporter?: ConsoleAgentReporter;
+  /** Whether the sticky todo list renders expanded (true) or as a compact one-liner (false). */
+  todosExpanded?: boolean;
+  /** Storage directory override for saved sessions (defaults to the real home). */
+  sessionHome?: string;
+  /** Whether commands are auto-approved without confirmation (Auto Mode). */
+  autoApprove?: boolean;
 }
 
 
@@ -91,18 +111,6 @@ const c = {
   yellow: (s: string) => pc.yellow(s),
 };
 
-function readVersion(): string {
-  try {
-    // src/cli/repl.ts and dist/cli/repl.js both sit two levels below root.
-    const here = path.dirname(fileURLToPath(import.meta.url));
-    const pkgPath = path.resolve(here, "..", "..", "package.json");
-    const pkg = JSON.parse(fs.readFileSync(pkgPath, "utf8")) as { version?: string };
-    return pkg.version ?? "0.1.0";
-  } catch {
-    return "0.1.0";
-  }
-}
-
 function historyPath(): string {
   const dir = path.join(os.homedir(), ".codeagent");
   try {
@@ -124,10 +132,25 @@ function loadHistory(rl: readline.Interface): void {
   }
 }
 
+const HISTORY_CAP = 200;
+
 function saveHistory(line: string): void {
   if (isSensitiveLine(line)) return; // never persist secrets
   try {
-    fs.appendFileSync(historyPath(), line + "\n");
+    const file = historyPath();
+    let existing: string[] = [];
+    try {
+      existing = fs.readFileSync(file, "utf8").split("\n").filter(Boolean);
+    } catch {
+      // First write to a fresh history file.
+    }
+    existing.push(line);
+    // Bound the file: once it grows past 2x the cap, rewrite trimmed to the cap.
+    if (existing.length > HISTORY_CAP * 2) {
+      fs.writeFileSync(file, existing.slice(-HISTORY_CAP).join("\n") + "\n");
+    } else {
+      fs.appendFileSync(file, line + "\n");
+    }
   } catch {
     // ignore
   }
@@ -209,8 +232,13 @@ function printHelp(): void {
     ${pc.cyan("/sandbox [docker|local]")} Switch execution environment between Docker and local host
     ${pc.cyan("/iterations <n>")}         Set max iterations for subsequent runs
 
+  ${pc.bold(pc.cyan("Agent Mechanisms & Planning:"))}
+    ${pc.cyan("/plan [on|off]")}          Toggle Dual-Phase Plan Mode (locks modifications for exploration)
+    ${pc.cyan("/todos, /tasks")}          Display or toggle current live tasks & progress (Ctrl+T)
+    ${pc.cyan("/worktree [slug]")}        Manage isolated Git worktrees (sandbox execution)
+
   ${pc.bold(pc.cyan("Context & Code Inspection:"))}
-    ${pc.cyan("/thought [on|off]")}       Toggle thinking display (or press Ctrl+T, alias: /t)
+    ${pc.cyan("/thought [on|off]")}       Toggle thinking display (Ctrl+O, alias: /t)
     ${pc.cyan("/diff")}                   Show colorized git diff
     ${pc.cyan("/compact")}                Compact conversation memory to reduce token usage
     ${pc.cyan("/status")}                 Show repo / provider / model / session settings
@@ -223,12 +251,16 @@ function printHelp(): void {
 function printStatus(session: SessionConfig): void {
   const info = describeProviderFromEnv(process.env, sessionOverrides(session));
   const turnCount = session.history && session.history.length > 0 ? Math.floor(session.history.length / 2) : 0;
+  const isAuto = session.permissions?.isAutoApprove() ?? session.autoApprove ?? false;
   console.log(`
   ${pc.bold(pc.cyan("Session Status"))}
   ${pc.dim("─".repeat(45))}
   ${pc.bold("ID:")}            ${session.activeSession?.id ? pc.cyan(session.activeSession.id) : pc.dim("none")}
   ${pc.bold("Title:")}         ${session.activeSession?.title ? pc.white(session.activeSession.title) : pc.dim("none")}
-  ${pc.bold("Workspace:")}     ${session.repoRoot}
+  ${pc.bold("Workspace:")}     ${session.repoRoot}${session.isWorktree ? pc.yellow(" (isolated worktree)") : ""}
+  ${pc.bold("Plan Mode:")}     ${session.planModeManager?.isActive() ? pc.cyan("ACTIVE (read-only exploration)") : pc.dim("normal (execution)")}
+  ${pc.bold("Execution Mode:")} ${isAuto ? pc.green("auto (auto-approves commands)") : pc.cyan("manual (prompts for confirmation)")}
+  ${pc.bold("Todo Tasks:")}    ${session.todoManager && session.todoManager.getTodos().length > 0 ? `${session.todoManager.getTodos().length} tasks (${session.todoManager.getTodos().filter((t) => t.status === "completed").length} completed)` : pc.dim("none")}
   ${pc.bold("Provider:")}      ${pc.magenta(info.kind)}${info.baseURL ? pc.dim(` (${info.baseURL})`) : ""}
   ${pc.bold("Model:")}         ${pc.yellow(info.model)}
   ${pc.bold("Max Iter:")}      ${pc.white(String(session.maxIterations))}
@@ -257,7 +289,17 @@ async function runTask(session: SessionConfig, task: string, signal: AbortSignal
     throw error;
   }
   const { responder, info } = provider;
-  const reporter = new ConsoleAgentReporter(session.repoRoot, session.autoExpandThought);
+  session.todoManager = session.todoManager ?? new TodoManager();
+  session.todoManager.clearIfAllCompleted();
+  session.planModeManager = session.planModeManager ?? new PlanModeManager();
+  session.fileStateCache = session.fileStateCache ?? new FileStateCache();
+
+  const isAuto = session.permissions?.isAutoApprove() ?? session.autoApprove ?? false;
+  const reporter = new ConsoleAgentReporter(session.repoRoot, session.autoExpandThought, session.todoManager?.getTodos());
+  reporter.setTodosExpanded(session.todosExpanded ?? true);
+  reporter.setIsAutoMode?.(isAuto);
+  reporter.startTask();
+  session.activeReporter = reporter;
   const agent = new Agent({
     repoRoot: session.repoRoot,
     model: info.model,
@@ -265,9 +307,14 @@ async function runTask(session: SessionConfig, task: string, signal: AbortSignal
     responder,
     permissions: session.permissions,
     reporter,
+    todoManager: session.todoManager,
+    planModeManager: session.planModeManager,
+    fileStateCache: session.fileStateCache,
   });
   try {
+    const taskStartedAt = Date.now();
     const result = await agent.run(task, { signal, history: session.history });
+    const tookSeconds = (Date.now() - taskStartedAt) / 1000;
     if (result.history) {
       session.history = compactHistory(result.history);
     }
@@ -286,7 +333,7 @@ async function runTask(session: SessionConfig, task: string, signal: AbortSignal
       session.activeSession.model = info.model;
       session.activeSession.provider = session.provider;
       session.activeSession.baseURL = session.baseURL;
-      saveSession(session.activeSession);
+      saveSession(session.activeSession, session.sessionHome);
     }
 
     // Rich formatted assistant response
@@ -294,17 +341,23 @@ async function runTask(session: SessionConfig, task: string, signal: AbortSignal
     console.log(formatMarkdown(result.finalMessage));
     console.log("");
 
-    const stats: string[] = [
-      `${pc.bold("iterations:")} ${pc.cyan(String(result.iterations))}`,
-      `${pc.bold("files:")} ${result.modifiedFiles.length > 0 ? pc.green(result.modifiedFiles.join(", ")) : pc.dim("(none)")}`,
-    ];
-    if (result.testResults && result.testResults.length > 0) {
-      const passed = result.testResults.filter((t) => t.exitCode === 0).length;
-      stats.push(`${pc.bold("tests:")} ${passed === result.testResults.length ? pc.green(`all ${passed} passed`) : pc.yellow(`${passed}/${result.testResults.length} passed`)}`);
+    // Point 7: Jump to bottom badge if response is long
+    if (result.finalMessage.split("\n").length > 15) {
+      console.log(renderJumpToBottomBadge());
+      console.log("");
     }
-    console.log(pc.dim("─".repeat(50)));
-    console.log(`  ${stats.join(" · ")}`);
+
+    // Point 6: Claude Code completion line: * Cooked for 2m 10s · done 10:13 PM
+    const durationMs = Date.now() - taskStartedAt;
+    console.log(formatTurnCompletionLine(durationMs));
     console.log("");
+
+    if (session.todoManager) {
+      const activeTodos = session.todoManager.getTodos();
+      if (activeTodos.length > 0) {
+        console.log(`${renderTodoList(activeTodos)}\n`);
+      }
+    }
   } catch (error) {
     reporter.stop();
     if (signal.aborted) {
@@ -319,7 +372,7 @@ async function runTask(session: SessionConfig, task: string, signal: AbortSignal
 export function handleSessionCommand(session: SessionConfig, subcmd: string, restArgs: string): void {
   const op = subcmd.toLowerCase();
   if (!op || op === "list") {
-    const list = listSessions(restArgs.includes("--all") ? undefined : session.repoRoot);
+    const list = listSessions(restArgs.includes("--all") ? undefined : session.repoRoot, session.sessionHome);
     if (list.length === 0) {
       console.log(c.dim("  No saved sessions found for this repository."));
       return;
@@ -341,13 +394,13 @@ export function handleSessionCommand(session: SessionConfig, subcmd: string, res
       console.log(c.dim("Usage: /session resume <number | session-id>"));
       return;
     }
-    const list = listSessions(session.repoRoot);
+    const list = listSessions(session.repoRoot, session.sessionHome);
     const num = Number(target);
     let targetId = target;
     if (!isNaN(num) && num >= 1 && num <= list.length) {
       targetId = list[num - 1].id;
     }
-    const loaded = loadSession(targetId);
+    const loaded = loadSession(targetId, session.sessionHome);
     if (!loaded) {
       console.log(c.yellow(`Session not found: ${target}`));
       return;
@@ -355,7 +408,7 @@ export function handleSessionCommand(session: SessionConfig, subcmd: string, res
     // Save current session first if it has turns or history
     if (session.activeSession && (session.activeSession.turnCount > 0 || (session.history && session.history.length > 0))) {
       session.activeSession.history = session.history ?? [];
-      saveSession(session.activeSession);
+      saveSession(session.activeSession, session.sessionHome);
     }
     session.activeSession = loaded;
     session.history = loaded.history ?? [];
@@ -369,7 +422,7 @@ export function handleSessionCommand(session: SessionConfig, subcmd: string, res
   if (op === "new") {
     if (session.activeSession && (session.activeSession.turnCount > 0 || (session.history && session.history.length > 0))) {
       session.activeSession.history = session.history ?? [];
-      saveSession(session.activeSession);
+      saveSession(session.activeSession, session.sessionHome);
     }
     session.activeSession = createSession(session.repoRoot, {
       title: restArgs || "New session",
@@ -378,7 +431,7 @@ export function handleSessionCommand(session: SessionConfig, subcmd: string, res
       baseURL: session.baseURL,
     });
     session.history = [];
-    saveSession(session.activeSession);
+    saveSession(session.activeSession, session.sessionHome);
     console.log(`Started new session ${c.cyan(session.activeSession.id)}: "${c.bold(session.activeSession.title)}".`);
     return;
   }
@@ -391,7 +444,7 @@ export function handleSessionCommand(session: SessionConfig, subcmd: string, res
       session.activeSession.title = restArgs;
     }
     session.activeSession.history = session.history ?? [];
-    saveSession(session.activeSession);
+    saveSession(session.activeSession, session.sessionHome);
     console.log(`Saved session ${c.cyan(session.activeSession.id)}: "${c.bold(session.activeSession.title)}".`);
     return;
   }
@@ -402,13 +455,13 @@ export function handleSessionCommand(session: SessionConfig, subcmd: string, res
       console.log(c.dim("Usage: /session delete <number | session-id>"));
       return;
     }
-    const list = listSessions(session.repoRoot);
+    const list = listSessions(session.repoRoot, session.sessionHome);
     const num = Number(target);
     let targetId = target;
     if (!isNaN(num) && num >= 1 && num <= list.length) {
       targetId = list[num - 1].id;
     }
-    const success = deleteSession(targetId);
+    const success = deleteSession(targetId, session.sessionHome);
     if (success) {
       console.log(`Deleted session ${c.cyan(targetId)}.`);
       if (session.activeSession?.id === targetId) {
@@ -423,6 +476,21 @@ export function handleSessionCommand(session: SessionConfig, subcmd: string, res
   }
 
   console.log(c.yellow(`Unknown session action '${subcmd}'. Try: /sessions, /session resume <n>, /session new, /session delete <n>`));
+}
+
+export function printShortcuts(): void {
+  console.log(`
+  ${pc.bold(pc.white("Keyboard Shortcuts & Quick Actions:"))}
+    ${pc.cyan("? / /help")}         Show all commands and shortcuts
+    ${pc.cyan("+")}                 Fan out subagents to explore codebase
+    ${pc.cyan("Ctrl+C / Esc")}      Interrupt running task
+    ${pc.cyan("Ctrl+T")}            Toggle task list (expanded / compact)
+    ${pc.cyan("Ctrl+O / /t")}       Toggle model thinking stream
+    ${pc.cyan("Ctrl+End")}          Jump to bottom of terminal output
+    ${pc.cyan("/undo")}             Revert file changes from last turn
+    ${pc.cyan("/plan")}             Lock modifications for read-only exploration
+    ${pc.cyan("/mode [auto|manual]")} Toggle auto-approval of terminal commands (/auto, /manual)
+`);
 }
 
 export async function startRepl(initial: SessionConfig): Promise<void> {
@@ -457,17 +525,32 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
   for (const notice of startupNotices) console.log(`  ${c.yellow(notice)}`);
   if (startupNotices.length > 0) console.log("");
 
+  // Pad down to the bottom of the terminal window so the prompt box is fixed at the bottom rows
+  const padToBottom = (linesUsed: number = 8) => {
+    if (!process.stdout?.isTTY) return;
+    const rows = process.stdout.rows || 24;
+    const needed = Math.max(0, rows - linesUsed - 3);
+    if (needed > 0) {
+      process.stdout.write("\n".repeat(needed));
+    }
+  };
+
+  const initialLinesUsed = 8 + startupNotices.length * 2;
+  padToBottom(initialLinesUsed);
+
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
-    prompt: `${pc.bold(pc.cyan("▲"))} ${pc.bold(">")} `,
+    prompt: `${pc.bold(pc.white(">"))} `,
+    removeHistoryDuplicates: true,
   });
   loadHistory(rl);
 
   if (!session.permissions) {
     session.permissions = new PermissionManager({
-      autoApprove: false,
+      autoApprove: session.autoApprove ?? false,
       handler: async (req) => {
+        session.activeReporter?.suspend?.();
         rl.pause();
         try {
           const decision = await promptPermission(req.target);
@@ -480,6 +563,7 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
           return decision === "yes";
         } finally {
           rl.resume();
+          session.activeReporter?.resume?.();
         }
       },
     });
@@ -489,22 +573,117 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
   let controller = new AbortController();
   let sigintCount = 0;
   let thoughtExpanded = session.autoExpandThought ?? false;
+  session.todosExpanded = session.todosExpanded ?? true;
 
   const onKeypress = (_str: string, key: readline.Key) => {
+    if (key && key.name === "return" && !running) {
+      clearBottomBox();
+    }
+    if (key && key.name === "escape") {
+      if (running) {
+        console.log(c.yellow("\nCancelling... (esc to interrupt)"));
+        controller.abort();
+        return;
+      }
+    }
+    if (key && key.ctrl && key.name === "end") {
+      process.stdout.write("\x1b[9999;1H");
+      session.activeReporter?.onJumpToBottom?.();
+      promptUser(true);
+      return;
+    }
+    // Ctrl+T works mid-run as well: the reporter owns its sticky footer
+    // lines and redraws them in place, so no console output is needed.
+    if (key && key.ctrl && key.name === "t") {
+      session.todosExpanded = !(session.todosExpanded ?? true);
+      if (running) {
+        session.activeReporter?.setTodosExpanded(session.todosExpanded);
+        return;
+      }
+      readline.cursorTo(process.stdout, 0);
+      readline.clearLine(process.stdout, 0);
+      const stateStr = session.todosExpanded ? pc.green("expanded") : pc.dim("collapsed");
+      console.log(`\n  ${pc.cyan("✻ Tasks view:")} ${stateStr} ${pc.dim("(Ctrl+T or /todos to toggle)")}`);
+      if (session.todosExpanded && session.todoManager) {
+        const list = session.todoManager.getTodos();
+        if (list.length > 0) {
+          console.log(`\n${renderTodoList(list)}`);
+        }
+      }
+      promptUser(true);
+      return;
+    }
     if (running) return;
-    if (key && key.ctrl && (key.name === "t" || key.name === "o")) {
+    if (key && key.ctrl && key.name === "o") {
+      readline.cursorTo(process.stdout, 0);
+      readline.clearLine(process.stdout, 0);
       if (latestThought?.text) {
         thoughtExpanded = !thoughtExpanded;
-        readline.cursorTo(process.stdout, 0);
-        readline.clearLine(process.stdout, 0);
         console.log(`\n${formatThoughtLine(latestThought.durationMs, thoughtExpanded, latestThought.text)}\n`);
-        rl.prompt(true);
+      } else {
+        console.log(c.dim("\n  No thinking text recorded for the latest turn."));
       }
+      promptUser(true);
+    }
+  };
+
+  const onResize = () => {
+    if (!running && process.stdout?.isTTY) {
+      drawBottomBox();
     }
   };
 
   if (process.stdin.isTTY) {
     process.stdin.on("keypress", onKeypress);
+  }
+  if (process.stdout?.isTTY) {
+    process.stdout.on("resize", onResize);
+  }
+
+  const drawBottomBox = () => {
+    if (!process.stdout?.isTTY || running) return;
+    const cols = process.stdout.columns || 80;
+    const border = pc.dim("─".repeat(cols));
+    const isPlan = session.planModeManager?.isActive();
+    const isAuto = session.permissions?.isAutoApprove() ?? session.autoApprove ?? false;
+    const dock = renderStatusDock({
+      mode: isPlan ? "plan" : isAuto ? "auto" : "manual",
+      isRunning: false,
+    });
+    const promptLen = (session.planModeManager?.isActive() ? "[PLAN] > " : "> ").length;
+    const cursorCol = promptLen + (rl.cursor || 0);
+
+    // From prompt row: move down 1 -> clear & draw border; move down 1 -> clear & draw dock; move up 2 -> restore cursor position
+    process.stdout.write(`\n\x1b[2K${border}\n\x1b[2K  ${dock}\x1b[2A\r\x1b[${cursorCol + 1}G`);
+  };
+
+  const clearBottomBox = () => {
+    if (!process.stdout?.isTTY) return;
+    const promptLen = (session.planModeManager?.isActive() ? "[PLAN] > " : "> ").length;
+    const cursorCol = promptLen + (rl.cursor || 0);
+    process.stdout.write(`\n\x1b[2K\n\x1b[2K\x1b[2A\r\x1b[${cursorCol + 1}G`);
+  };
+
+  const promptUser = (preserve?: boolean) => {
+    if (running) return;
+    if (session.planModeManager?.isActive()) {
+      rl.setPrompt(`${pc.bold(pc.cyan("[PLAN]"))} ${pc.bold(">")} `);
+    } else {
+      rl.setPrompt(`${pc.bold(pc.white(">"))} `);
+    }
+    rl.prompt(preserve);
+    drawBottomBox();
+  };
+
+  // Hook _refreshLine so typing live keeps the bottom border and dock pinned below the cursor
+  const origRefreshLine = (rl as any)._refreshLine?.bind(rl);
+  if (origRefreshLine) {
+    (rl as any)._refreshLine = function () {
+      origRefreshLine();
+      if (!running) {
+        drawBottomBox();
+      }
+    };
   }
 
   // Manual SIGINT handling: cancel run first, exit only when idle.
@@ -514,6 +693,7 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
       controller.abort();
       return;
     }
+    clearBottomBox();
     sigintCount++;
     if (sigintCount >= 2) {
       if (process.stdin.isTTY) {
@@ -523,20 +703,33 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
       rl.close();
     } else {
       console.log(c.dim("\n(To exit, press Ctrl+C again or type /exit)"));
-      rl.prompt();
+      promptUser();
     }
   });
 
-  rl.prompt();
+  promptUser();
 
-  for await (const line of rl) {
+  for await (let line of rl) {
+    clearBottomBox();
     sigintCount = 0;
-    const trimmed = line.trim();
+    let trimmed = line.trim();
 
     if (!trimmed) {
-      rl.prompt();
+      promptUser();
       continue;
     }
+
+    if (trimmed === "?" || trimmed === "/?") {
+      printShortcuts();
+      promptUser();
+      continue;
+    }
+
+    if (trimmed === "+") {
+      line = "fan out subagents to explore the codebase thoroughly";
+      trimmed = line;
+    }
+
     saveHistory(trimmed);
 
     const slash = parseSlashCommand(trimmed);
@@ -545,6 +738,9 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
       switch (cmd) {
         case "help":
           printHelp();
+          break;
+        case "shortcuts":
+          printShortcuts();
           break;
         case "status":
           printStatus(session);
@@ -617,8 +813,20 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
           if (!args) {
             console.log(c.dim("Usage: /repo <path>"));
           } else {
-            session.repoRoot = path.resolve(args);
-            console.log(`Repository → ${c.cyan(session.repoRoot)}`);
+            const newRoot = path.resolve(args);
+            if (newRoot === session.repoRoot) {
+              console.log(c.dim(`  Already on repository: ${session.repoRoot}`));
+              break;
+            }
+            session.repoRoot = newRoot;
+            // Rebind repo-scoped state so /undo, /checkpoints and drift
+            // detection never reference the previous repository.
+            session.checkpoints = new CheckpointManager(newRoot);
+            session.fileStateCache = new FileStateCache();
+            session.isWorktree = false;
+            session.mainRepoRoot = undefined;
+            console.log(`Repository → ${c.cyan(newRoot)}`);
+            printBanner(session);
           }
           break;
         case "iterations":
@@ -683,9 +891,24 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
             console.log(c.dim("Context memory is already compact / empty."));
           }
           break;
-        case "sessions":
+        case "sessions": {
           handleSessionCommand(session, "list", args);
+          if (process.stdin.isTTY) {
+            const list = listSessions(args.includes("--all") ? undefined : session.repoRoot, session.sessionHome);
+            if (list.length > 0) {
+              rl.pause();
+              try {
+                const chosen = await promptSessionSelect(list, session.activeSession?.id);
+                if (chosen) {
+                  handleSessionCommand(session, "resume", chosen);
+                }
+              } finally {
+                rl.resume();
+              }
+            }
+          }
           break;
+        }
         case "session": {
           const parts = args.trim().split(/\s+/);
           const subcmd = parts[0] || "list";
@@ -732,6 +955,111 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
           }
           break;
         }
+        case "plan": {
+          if (!session.planModeManager) session.planModeManager = new PlanModeManager();
+          const arg = args.trim().toLowerCase();
+          if (arg === "off" || (session.planModeManager.isActive() && arg !== "on")) {
+            session.planModeManager.exit(args || "Manually exited plan mode via CLI");
+            console.log(pc.green("\n  ✔ Exited Plan Mode. Ready for execution.\n"));
+          } else {
+            session.planModeManager.enter();
+            console.log(pc.cyan("\n  ✻ Entered Plan Mode. Code modifications are locked; inspection tools enabled.\n"));
+          }
+          break;
+        }
+        case "auto": {
+          session.autoApprove = true;
+          session.permissions?.setAutoApprove(true);
+          session.activeReporter?.setIsAutoMode?.(true);
+          console.log(pc.green("\n  ● Switched to Auto Mode. Shell commands will run without confirmation prompts.\n"));
+          break;
+        }
+        case "manual": {
+          session.autoApprove = false;
+          session.permissions?.setAutoApprove(false);
+          session.activeReporter?.setIsAutoMode?.(false);
+          console.log(pc.cyan("\n  • Switched to Manual Mode. Shell commands will prompt for confirmation.\n"));
+          break;
+        }
+        case "mode": {
+          const targetMode = args.trim().toLowerCase();
+          if (targetMode === "auto") {
+            session.autoApprove = true;
+            session.permissions?.setAutoApprove(true);
+            session.activeReporter?.setIsAutoMode?.(true);
+            console.log(pc.green("\n  ● Switched to Auto Mode. Shell commands will run without confirmation prompts.\n"));
+          } else if (targetMode === "manual") {
+            session.autoApprove = false;
+            session.permissions?.setAutoApprove(false);
+            session.activeReporter?.setIsAutoMode?.(false);
+            console.log(pc.cyan("\n  • Switched to Manual Mode. Shell commands will prompt for confirmation.\n"));
+          } else {
+            const current = session.permissions?.isAutoApprove() ? "auto" : "manual";
+            console.log(c.dim(`\n  Current execution mode: ${c.bold(current)} (options: /mode auto | /mode manual, or /auto, /manual)\n`));
+          }
+          break;
+        }
+        case "todos":
+        case "tasks":
+        case "todo": {
+          const arg = args.trim().toLowerCase();
+          if (arg === "clear") {
+            session.todoManager?.clear();
+            console.log(pc.green("\n  ✔ Cleared todo list.\n"));
+          } else if (arg === "toggle") {
+            session.todosExpanded = !(session.todosExpanded ?? true);
+            console.log(`\n  Tasks view: ${session.todosExpanded ? pc.green("expanded") : pc.dim("collapsed")}\n`);
+          } else {
+            const list = session.todoManager?.getTodos() ?? [];
+            if (list.length === 0) {
+              console.log(c.dim("\n  No active tasks in todo list. The agent will create one on multi-step tasks.\n"));
+            } else {
+              console.log(`\n${renderTodoList(list)}\n`);
+            }
+          }
+          break;
+        }
+        case "worktree": {
+          const parts = args.trim().split(/\s+/);
+          const sub = parts[0]?.toLowerCase() || "status";
+          const target = parts.slice(1).join(" ").trim();
+
+          if (sub === "create" || sub === "new") {
+            const slug = target || "task";
+            try {
+              console.log(c.dim(`  Creating isolated worktree for '${slug}'...`));
+              const info = await createWorktree(session.repoRoot, slug);
+              session.mainRepoRoot = session.mainRepoRoot ?? session.repoRoot;
+              session.repoRoot = info.worktreePath;
+              session.isWorktree = true;
+              console.log(pc.green(`  ✔ Created and switched to worktree:`));
+              console.log(`    ${pc.bold("Path:")}   ${info.worktreePath}`);
+              console.log(`    ${pc.bold("Branch:")} ${info.branch}`);
+              console.log(c.dim(`    All agent operations are now isolated in this worktree.\n`));
+            } catch (err) {
+              console.error(pc.red(`  Failed to create worktree: ${err instanceof Error ? err.message : err}`));
+            }
+          } else if (sub === "main" || sub === "root" || sub === "leave") {
+            if (!session.isWorktree) {
+              console.log(c.dim("  Already on primary workspace repository."));
+            } else {
+              const mainRoot = session.mainRepoRoot ?? resolveMainRootFromWorktree(session.repoRoot);
+              session.repoRoot = mainRoot;
+              session.mainRepoRoot = undefined;
+              session.isWorktree = false;
+              console.log(pc.green(`  ✔ Returned to main repository: ${mainRoot}`));
+            }
+          } else if (sub === "status") {
+            console.log(`  ${pc.bold("Current Workspace:")} ${session.repoRoot}${session.isWorktree ? pc.yellow(" (isolated worktree)") : " (main repo)"}`);
+            if (session.isWorktree) {
+              const modified = await hasWorktreeModifications(session.repoRoot);
+              console.log(`  ${pc.bold("Has Modifications:")} ${modified ? pc.yellow("Yes") : pc.green("Clean")}`);
+            }
+          } else {
+            console.log(c.dim("  Usage: /worktree create <slug> | /worktree main | /worktree status"));
+          }
+          break;
+        }
         case "clear":
           console.clear();
           session.history = [];
@@ -741,20 +1069,28 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
               provider: session.provider,
               baseURL: session.baseURL,
             });
-            saveSession(session.activeSession);
+            saveSession(session.activeSession, session.sessionHome);
           }
           printBanner(session);
+          padToBottom(8);
           break;
         case "exit":
         case "quit":
+          clearBottomBox();
           console.log(c.dim("Bye."));
+          if (process.stdin.isTTY) {
+            process.stdin.removeListener("keypress", onKeypress);
+          }
+          if (process.stdout?.isTTY) {
+            process.stdout.removeListener("resize", onResize);
+          }
           rl.close();
           return;
         default:
           console.log(c.yellow(`Unknown command /${cmd}. Try /help.`));
           break;
       }
-      rl.prompt();
+      promptUser();
       continue;
     }
 
@@ -767,7 +1103,7 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
     controller = new AbortController();
     // Show a styled user message block before the agent responds so it's
     // visually clear which text is the user query vs agent output.
-    printUserMessage(trimmed);
+    printUserMessage(trimmed, { prompt: rl.getPrompt(), input: line });
     try {
       await runTask(session, trimmed, controller.signal);
     } finally {
@@ -781,6 +1117,6 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
     } catch {
       // Non-git directory — not fatal.
     }
-    rl.prompt();
+    promptUser();
   }
 }

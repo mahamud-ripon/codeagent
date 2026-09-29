@@ -38,6 +38,37 @@ describe("filesystem tools", () => {
     await expect(writeFile(tmp, ".env", "K=1")).rejects.toThrow(/secret/i);
   });
 
+  it("rejects image files with a clear, actionable error", async () => {
+    await fs.writeFile(path.join(tmp, "image.png"), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x01]));
+    await expect(readFile(tmp, "image.png")).rejects.toThrow(/image file.*text-only|Cannot read image\.png/is);
+    await expect(viewFile(tmp, "image.png")).rejects.toThrow(/image file/i);
+    await expect(editFile(tmp, "image.png", "a", "b")).rejects.toThrow(/image file/i);
+  });
+
+  it("rejects known binary and media extensions", async () => {
+    await fs.writeFile(path.join(tmp, "bundle.zip"), Buffer.from("PK\u0000\u0001"));
+    await fs.writeFile(path.join(tmp, "clip.mp4"), Buffer.from("\u0000\u0000\u0000"));
+    await expect(readFile(tmp, "bundle.zip")).rejects.toThrow(/binary file/i);
+    await expect(readFile(tmp, "clip.mp4")).rejects.toThrow(/media file/i);
+  });
+
+  it("content-sniffs extensionless binaries via NUL bytes", async () => {
+    await fs.writeFile(path.join(tmp, "rawblob"), Buffer.concat([
+      Buffer.from("text-before\u0000"),
+      Buffer.alloc(64, 0x41),
+    ]));
+    await expect(readFile(tmp, "rawblob")).rejects.toThrow(/binary file/i);
+  });
+
+  it("still reads text files that merely look unusual", async () => {
+    await fs.writeFile(path.join(tmp, "plain.txt"), "just text, no NULs\n");
+    expect(await readFile(tmp, "plain.txt")).toBe("just text, no NULs\n");
+  });
+
+  it("edit_file still reports file-not-found for missing files", async () => {
+    await expect(editFile(tmp, "missing.ts", "a", "b")).rejects.toThrow(/File not found/);
+  });
+
   it("edit_file replaces exactly one occurrence", async () => {
     await writeFile(tmp, "a.txt", "foo bar foo");
     // ambiguous -> must fail, never silently pick one

@@ -220,10 +220,12 @@ export function createChatResponder(
       ...(useTools ? { tools: toChatTools() as unknown as ChatTool[] } : {}),
     });
 
-    const msg = completion.choices[0]?.message;
+    const choice = completion.choices[0];
+    const msg = choice?.message;
     if (!msg) throw new Error("Chat provider returned no choices.");
 
     const { content: text, thinking } = extractThinking(msg);
+    const finish_reason = (choice as { finish_reason?: string })?.finish_reason;
     const output: ResponsesCreateResult["output"] = [];
     if (text) output.push({ type: "message", content: text });
     for (const tc of msg.tool_calls ?? []) {
@@ -234,6 +236,6 @@ export function createChatResponder(
         arguments: tc.function.arguments,
       });
     }
-    return { output, output_text: text, reasoning_text: thinking };
+    return { output, output_text: text, reasoning_text: thinking, finish_reason };
   };
 }

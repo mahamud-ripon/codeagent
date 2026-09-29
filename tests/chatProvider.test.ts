@@ -8,9 +8,9 @@ import { createProviderFromEnv } from "../src/llm/provider.js";
 import { toChatTools } from "../src/llm/tools.js";
 
 describe("toChatTools", () => {
-  it("converts all 11 tools to chat shape", () => {
+  it("converts all 14 tools to chat shape", () => {
     const chat = toChatTools();
-    expect(chat).toHaveLength(11);
+    expect(chat).toHaveLength(14);
     expect(chat[0]).toMatchObject({
       type: "function",
       function: { name: "list_files" },
@@ -18,6 +18,9 @@ describe("toChatTools", () => {
     expect(chat.some((t) => t.function.name === "view_file")).toBe(true);
     expect(chat.some((t) => t.function.name === "view_symbol_outline")).toBe(true);
     expect(chat.some((t) => t.function.name === "run_subagent")).toBe(true);
+    expect(chat.some((t) => t.function.name === "todo_write")).toBe(true);
+    expect(chat.some((t) => t.function.name === "enter_plan_mode")).toBe(true);
+    expect(chat.some((t) => t.function.name === "exit_plan_mode")).toBe(true);
   });
 });
 

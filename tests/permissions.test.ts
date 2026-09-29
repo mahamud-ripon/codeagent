@@ -6,8 +6,19 @@ import type { Responder } from "../src/llm/client.js";
 describe("PermissionManager", () => {
   it("autoApprove allows any command", async () => {
     const pm = new PermissionManager({ autoApprove: true });
+    expect(pm.isAutoApprove()).toBe(true);
     expect(await pm.checkCommand("npm test")).toBe(true);
     expect(await pm.checkCommand("rm -rf something")).toBe(true);
+  });
+
+  it("can toggle autoApprove dynamically", async () => {
+    const pm = new PermissionManager({ autoApprove: false, handler: async () => false });
+    expect(pm.isAutoApprove()).toBe(false);
+    expect(await pm.checkCommand("npm test")).toBe(false);
+
+    pm.setAutoApprove(true);
+    expect(pm.isAutoApprove()).toBe(true);
+    expect(await pm.checkCommand("npm test")).toBe(true);
   });
 
   it("checks prefixes in allowlist", async () => {

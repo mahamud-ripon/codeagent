@@ -28,6 +28,14 @@ export class PermissionManager {
     }
   }
 
+  isAutoApprove(): boolean {
+    return this.autoApprove;
+  }
+
+  setAutoApprove(value: boolean): void {
+    this.autoApprove = value;
+  }
+
   isCommandAllowed(command: string): boolean {
     if (this.autoApprove) return true;
     const lower = command.trim().toLowerCase();

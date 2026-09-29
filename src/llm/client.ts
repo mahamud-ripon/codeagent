@@ -32,6 +32,8 @@ export interface ResponsesCreateResult {
   output_text: string;
   /** Extracted thinking / reasoning text from models that support it. */
   reasoning_text?: string;
+  /** Provider finish reason (e.g., 'stop', 'length', 'tool_calls'). */
+  finish_reason?: string;
 }
 
 export interface ResponderOptions {

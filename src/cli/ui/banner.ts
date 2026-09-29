@@ -3,7 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import boxen from "boxen";
-import { colors, icons, pc } from "./theme.js";
+import { getSandboxMode } from "../../tools/sandbox.js";
+import { icons, pc } from "./theme.js";
 
 export interface BannerInfo {
   repoRoot: string;
@@ -43,41 +44,69 @@ export function getGitBranch(cwd: string): string | null {
   }
 }
 
+const WELCOME_TIPS: string[] = [
+  "Ask for a plan first — /plan locks read-only exploration before large refactors",
+  "Press Ctrl+T to toggle the live task list, Ctrl+O to expand thinking",
+  "/undo instantly reverts every file change made in the last task",
+  "Use /worktree create <slug> to run risky changes in an isolated git worktree",
+  "Switch models mid-session with /model <id> — keys are never stored in history",
+  "/compact trims context memory when a session grows long",
+  "Run /sessions to jump back into a previous conversation",
+  "/sandbox docker isolates every terminal command in a container",
+  "Ask questions in plain language — the agent plans, edits, and verifies",
+];
+
+/** Deterministic-random selection of welcome tips (rotates each launch). */
+export function pickWelcomeTips(pool: string[] = WELCOME_TIPS, count = 3): string[] {
+  const arr = [...pool];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr.slice(0, count);
+}
+
 export function renderBanner(info: BannerInfo): void {
   const version = readPackageVersion();
   const branch = getGitBranch(info.repoRoot);
   const branchBadge = branch ? pc.dim(` (${icons.branch} ${branch})`) : "";
 
-  const titleLine = `${pc.bold(pc.cyan("▲ CODEAGENT"))} ${pc.dim(`v${version}`)}   ${info.needsKey ? pc.yellow(`${icons.warn} Needs API Key`) : pc.green(`${icons.connected} Ready`)}`;
+  const terracotta = (s: string) => `\x1b[38;2;227;100;70m${s}\x1b[0m`;
 
-  const lines: string[] = [
-    titleLine,
-    "",
-    `  ${pc.bold("Workspace:")}  ${pc.white(info.repoRoot)}${branchBadge}`,
-    `  ${pc.bold("Model:")}      ${pc.yellow(info.model)}${info.baseURL ? pc.dim(` (${info.baseURL})`) : ""}`,
+  // 5-line pixel art mascot matching Claude Code's terracotta mascot
+  const mascotLines = [
+    terracotta("  ▄   ▄  "),
+    terracotta(" █▀█▀█▀█ "),
+    terracotta(" █ ▀ ▀ █ "),
+    terracotta(" █▄▄▄▄▄█ "),
+    terracotta("  █ █ █  "),
   ];
 
-  if (info.sessionId) {
-    const turns = info.turnCount !== undefined ? ` · ${info.turnCount} turn(s)` : "";
-    const title = info.sessionTitle ? ` ("${info.sessionTitle}")` : "";
-    lines.push(`  ${pc.bold("Session:")}    ${pc.cyan(info.sessionId)}${pc.dim(`${title}${turns}`)}`);
-  }
+  const statusText = info.needsKey
+    ? pc.yellow("Needs API Key (/key)")
+    : pc.dim("API Usage Ready");
+
+  const modelLine = `${pc.dim(info.model)} · ${statusText}`;
+  const titleLine = `${pc.bold(pc.white("CodeAgent"))} ${pc.bold(pc.white(`v${version}`))}`;
+  const pathLine = pc.dim(`${info.repoRoot}${branchBadge}`);
+
+  const infoLines = [
+    titleLine,
+    modelLine,
+    pathLine,
+    "",
+    "",
+  ];
 
   if (info.needsKey) {
-    lines.push("");
-    lines.push(`  ${pc.yellow("Run /key <api-key> to set your LLM key (Groq / OpenAI / OpenRouter).")}`);
+    infoLines[3] = pc.yellow("Run /key <api-key> to set your LLM key (Groq / OpenAI / OpenRouter).");
   }
 
-  lines.push("");
-  lines.push(`  ${pc.dim(`Type your task, or "${pc.cyan("/help")}" for commands · ${pc.cyan("Ctrl+C")} cancels`)}`);
-
-  const box = boxen(lines.join("\n"), {
-    padding: { top: 0, bottom: 0, left: 1, right: 1 },
-    margin: { top: 1, bottom: 0 },
-    borderColor: "cyan",
-    borderStyle: "round",
-  });
-
-  console.log(box);
+  console.log("");
+  for (let i = 0; i < mascotLines.length; i++) {
+    const mascot = mascotLines[i];
+    const text = infoLines[i] || "";
+    console.log(` ${mascot}  ${text}`);
+  }
   console.log("");
 }

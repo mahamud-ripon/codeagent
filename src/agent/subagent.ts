@@ -3,10 +3,13 @@ import type { Responder } from "../llm/client.js";
 import { createProviderFromEnv } from "../llm/provider.js";
 import { truncate } from "../utils/truncate.js";
 
+export type SubagentType = "explore" | "plan";
+
 export interface SubagentOptions {
   maxIterations?: number;
   responder?: Responder;
   signal?: AbortSignal;
+  subagentType?: SubagentType;
 }
 
 const ALLOWED_SUBAGENT_TOOLS = new Set([
@@ -17,13 +20,14 @@ const ALLOWED_SUBAGENT_TOOLS = new Set([
   "view_symbol_outline",
 ]);
 
-const SUBAGENT_SYSTEM_PROMPT = `You are an Explorer Subagent. Your mission is to explore, search, and analyze the repository to answer the given research task.
+const EXPLORE_SYSTEM_PROMPT = `You are an Explorer Subagent for Codeagent. Your mission is to explore, search, and analyze the repository to answer the given research task.
 
 RULES:
 1. You have READ-ONLY tools: list_files, read_file, view_file, search, view_symbol_outline.
 2. You CANNOT modify files, write code, or run shell commands.
 3. Be targeted: use search and view_symbol_outline to find relevant code quickly.
-4. When you have enough information, reply with your final synthesized answer in this format:
+4. Spawning parallel tool calls for searching and reading files is encouraged.
+5. When you have enough information, reply with your final synthesized answer in this format:
 
 ### Findings
 <direct answer with specific file paths and line references>
@@ -35,8 +39,29 @@ RULES:
 <recommended modifications or files to touch>
 `;
 
+const PLAN_SYSTEM_PROMPT = `You are a Software Architect and Planning Subagent for Codeagent. Your mission is to explore the codebase and design an implementation plan.
+
+RULES:
+1. You have READ-ONLY tools: list_files, read_file, view_file, search, view_symbol_outline.
+2. You CANNOT modify files, write code, or run shell commands.
+3. Explore thoroughly: examine existing conventions, architecture, and similar features as reference.
+4. When you have enough information, reply with your final synthesized architectural plan in this format:
+
+### Architecture & Approach
+<trade-offs, design patterns, and overall implementation strategy>
+
+### Step-by-Step Implementation Plan
+1. <step 1 with specific file paths and function signatures>
+2. <step 2...>
+
+### Critical Files for Implementation
+List 3-5 files most critical for implementing this plan:
+- path/to/file1
+- path/to/file2
+`;
+
 /**
- * Executes a focused, read-only exploration task in an isolated context window.
+ * Executes a focused, read-only exploration or planning task in an isolated context window.
  * Offloads multi-step search/reads so the main agent's context memory remains clean.
  */
 export async function runSubagent(
@@ -46,12 +71,14 @@ export async function runSubagent(
 ): Promise<string> {
   const maxIterations = options?.maxIterations ?? 5;
   const signal = options?.signal;
+  const subagentType = options?.subagentType ?? "explore";
+  const systemPrompt = subagentType === "plan" ? PLAN_SYSTEM_PROMPT : EXPLORE_SYSTEM_PROMPT;
   const responder =
     options?.responder ??
     createProviderFromEnv(process.env).responder;
 
   const history: unknown[] = [
-    { role: "system", content: SUBAGENT_SYSTEM_PROMPT },
+    { role: "system", content: systemPrompt },
     { role: "user", content: `Research Task: ${task}` },
   ];
 
