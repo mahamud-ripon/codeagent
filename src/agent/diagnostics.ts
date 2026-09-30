@@ -157,15 +157,17 @@ async function runBestEffort(cmd: string, repoRoot: string, timeoutMs = 3000): P
     // Clean output (e.g. "All checks passed!") must NEVER be treated as an error.
     return null;
   } catch (e: unknown) {
-    const err = e as { stdout?: string; stderr?: string; killed?: boolean };
+    const err = e as { stdout?: string; stderr?: string; killed?: boolean; code?: number | string };
     if (err.killed) return null;
+    // POSIX exit code 127 = command not found; ENOENT = binary missing
+    if (err.code === 127 || err.code === "ENOENT") return null;
     const out = [err.stdout, err.stderr].filter(Boolean).join("\n").trim();
     if (!out) return null;
     // If the command failed because the tool is not installed or command not found, ignore it.
     if (
       /not recognized as an internal or external command/i.test(out) ||
       /is not recognized as the name of a cmdlet/i.test(out) ||
-      /command not found/i.test(out) ||
+      /not found/i.test(out) ||
       /cannot find the file specified/i.test(out) ||
       /No such file or directory/i.test(out)
     ) {
@@ -193,8 +195,10 @@ async function getPythonDiagnostics(repoRoot: string, filePath: string): Promise
   const ruff = await runBestEffort(`ruff check ${JSON.stringify(filePath)}`, repoRoot);
   if (ruff) return `⚠️ Ruff:\n${ruff}`;
 
-  // 2. Built-in Python syntax compilation check
-  const pyCompile = await runBestEffort(`python -m py_compile ${JSON.stringify(filePath)}`, repoRoot);
+  // 2. Built-in Python syntax compilation check (trying python, then python3)
+  const pyCompile =
+    (await runBestEffort(`python -m py_compile ${JSON.stringify(filePath)}`, repoRoot)) ??
+    (await runBestEffort(`python3 -m py_compile ${JSON.stringify(filePath)}`, repoRoot));
   if (pyCompile) return `⚠️ Python Syntax Error:\n${pyCompile}`;
 
   return null;
