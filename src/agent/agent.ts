@@ -211,10 +211,23 @@ export class Agent {
       return this.responder(input, opts);
     }
     const { collectStreamingWithEmit } = await import("../llm/collectStream.js");
-    return collectStreamingWithEmit(
-      this.providerInstance,
-      { system: this.systemPrompt ?? "", messages: input, tools: opts?.tools ?? true, signal: opts?.signal },
-      (e) => this.emit(e),
+    const { withProviderRetry } = await import("../llm/retry.js");
+    return withProviderRetry(
+      () =>
+        collectStreamingWithEmit(
+          this.providerInstance!,
+          { system: this.systemPrompt ?? "", messages: input, tools: opts?.tools ?? true, signal: opts?.signal },
+          (e) => this.emit(e),
+        ),
+      {
+        signal: opts?.signal,
+        maxAttempts: 4,
+        baseMs: 1500,
+        maxMs: 15_000,
+        onRetry: (attempt, waitMs, msg) => {
+          this.log(`Streaming provider retry ${attempt} after error (${msg}), waiting ${waitMs}ms...`);
+        },
+      },
     );
   }
 
@@ -281,7 +294,26 @@ export class Agent {
         this.checkCancelled(signal);
 
         const thinkingStart = Date.now();
-        const result = await this.callModel(input, { tools: false, signal });
+        let result: ResponsesCreateResult;
+        try {
+          result = await this.callModel(input, { tools: false, signal });
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          this.log(`Conversational callModel failed: ${msg}`);
+          const fallbackText =
+            `Hello! I'm **CodeAgent**, your software engineering assistant.\n\n` +
+            `⚠️ Note: The upstream AI model reported high traffic or temporary overload (${msg}).\n` +
+            `You can retry in a moment, or switch to a high-capacity model (e.g. \`llama-3.3-70b-versatile\` or \`gpt-4o\`).`;
+          this.reporter?.stop();
+          return {
+            finalMessage: fallbackText,
+            iterations: 1,
+            modifiedFiles: [],
+            testResults: [],
+            history: input,
+            intent,
+          };
+        }
         const thinkingDurationMs = Date.now() - thinkingStart;
         if (result.reasoning_text?.trim() && this.reporter?.onThinking) {
           this.reporter.onThinking(result.reasoning_text.trim(), thinkingDurationMs);
