@@ -22,12 +22,20 @@ export { detectEndpointForKey } from "./config.js";
  */
 
 import { PermissionManager } from "../agent/permissions.js";
-import { loadModelSettings, loadPermissionSettings } from "../agent/settings.js";
+import { loadHooksSettings, loadModelSettings, loadPermissionSettings, loadSandboxSettings } from "../agent/settings.js";
 import { compactHistory, compactHistoryWithSummary } from "../agent/compactor.js";
 import { logAudit } from "../agent/audit.js";
 import { appendMemoryNote, generateMemoryFile } from "../agent/rules.js";
 import { CheckpointManager } from "../agent/checkpoint.js";
-import { getSandboxMode, setSandboxMode } from "../tools/sandbox.js";
+import { ensurePersistentContainer, getSandboxMode, removePersistentContainer, sandboxConfigFromSettings, setSandboxMode } from "../tools/sandbox.js";
+// F-13 split modules: the REPL runtime delegates to these pure helpers
+// (command metadata, session transitions, input handling) instead of
+// re-implementing them inline.
+import { commandNames, findCommand } from "./commandRegistry.js";
+import { transitionForCommand } from "./sessionController.js";
+import { collapseLargePaste, historySearch, shouldSubmitOnEnter } from "./inputHandler.js";
+import { MessageQueue, renderNextEvent, renderStatusLine } from "../tui/next.js";
+import { createReporterAdapter } from "./ui/reporterAdapter.js";
 import {
   appendSessionTurn,
   createSession,
@@ -98,7 +106,7 @@ export interface SessionConfig {
   /** Whether commands are auto-approved without confirmation (Auto Mode). */
   autoApprove?: boolean;
   /** Cumulative token/cost usage for this REPL session (powers /cost). */
-  usage?: { input: number; output: number; costUsd: number };
+  usage?: { input: number; output: number; costUsd: number; cachedInput?: number };
   /** UI selector (UI-1…UI-13): legacy readline (default) or next streaming UI. */
   ui?: "legacy" | "next";
   /**
@@ -304,18 +312,20 @@ function formatUsd(value: number): string {
   return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
 }
 
-/** Session token/cost totals for /cost (ML-6). */
+/** Session token/cost totals for /cost (ML-6, ML-9 cache hits). */
 export function printCost(session: SessionConfig): void {
   const info = describeProviderFromEnv(process.env, sessionOverrides(session));
   const usage = session.usage ?? { input: 0, output: 0, costUsd: 0 };
   const caps = getModelCapabilities(info.model);
   const priced = caps.inputPricePerMtok !== undefined && caps.outputPricePerMtok !== undefined;
+  const cached = usage.cachedInput ?? 0;
   console.log(`
   ${pc.bold(pc.cyan("Session Cost"))}
   ${pc.dim("─".repeat(45))}
   ${pc.bold("Model:")}         ${pc.yellow(info.model)}
   ${pc.bold("Input tokens:")}  ${pc.white(usage.input.toLocaleString())}
   ${pc.bold("Output tokens:")} ${pc.white(usage.output.toLocaleString())}
+  ${pc.bold("Cached input:")}  ${pc.white(cached.toLocaleString())}${cached > 0 && usage.input > 0 ? pc.dim(` (${((cached / usage.input) * 100).toFixed(0)}% of input served from cache)`) : ""}
   ${pc.bold("Cost:")}          ${priced ? pc.green(formatUsd(usage.costUsd)) : pc.dim(`${formatUsd(usage.costUsd)} (price unknown for this model)`)}
   ${pc.bold("Budgets:")}       ${pc.dim("set per-run caps with --max-iterations; token/cost budgets stop the loop (stopReason: budget)")}
 `);
@@ -365,7 +375,7 @@ async function runTask(
     }
     throw error;
   }
-  const { responder, info } = provider;
+  const { responder, info, providerInstance, systemPrompt } = provider;
   session.todoManager = session.todoManager ?? new TodoManager();
   session.todoManager.clearIfAllCompleted();
   session.planModeManager = session.planModeManager ?? new PlanModeManager();
@@ -373,18 +383,37 @@ async function runTask(
 
   // Model roles + capability overrides (ML-3/ML-5): the fast role backs
   // LLM-written compaction summaries; window overrides rescale compaction.
+  // The plan role backs the main loop while plan mode is active.
   const modelSettings = loadModelSettings(session.repoRoot);
+  const { resolveRoles } = await import("../llm/modelRouting.js");
+  const roles = resolveRoles(modelSettings, info.model);
   let summarizer: Responder | undefined;
-  if (modelSettings.fast && modelSettings.fast !== info.model) {
+  if (roles.fast && roles.fast !== info.model) {
     try {
       summarizer = createProviderFromEnv(process.env, {
         ...sessionOverrides(session),
-        model: modelSettings.fast,
+        model: roles.fast,
       }).responder;
     } catch {
       summarizer = undefined;
     }
   }
+  let planResponder: Responder | undefined;
+  if (roles.plan && roles.plan !== info.model) {
+    try {
+      planResponder = createProviderFromEnv(process.env, {
+        ...sessionOverrides(session),
+        model: roles.plan,
+      }).responder;
+    } catch {
+      planResponder = undefined;
+    }
+  }
+  // EX-3: settings hooks flow into the loop (Pre/Post fire in Agent;
+  // SessionStart fired once in startRepl, UserPromptSubmit/Stop/PreCompact in Agent).
+  const { loadHookConfig } = await import("../agent/hooks.js");
+  void loadHookConfig;
+  const settingsHooks = loadHooksSettings(session.repoRoot);
 
   const isAuto = session.permissions?.isAutoApprove() ?? session.autoApprove ?? false;
   const reporter = new ConsoleAgentReporter(session.repoRoot, session.autoExpandThought, session.todoManager?.getTodos());
@@ -392,11 +421,42 @@ async function runTask(
   reporter.setIsAutoMode?.(isAuto);
   reporter.startTask();
   session.activeReporter = reporter;
+  // F-12: --ui=next streams AgentEvents through the zero-dep renderer
+  // in addition to the legacy reporter (parity path behind the flag).
+  const useNextUi = session.ui === "next";
+  const nextQueue = new MessageQueue();
+  void nextQueue;
+  let nextState = { codeFence: false as boolean };
+  const onEvent = useNextUi
+    ? (event: import("../llm/events.js").AgentEvent) => {
+        if ("respond" in (event as Record<string, unknown>)) return;
+        const rendered = renderNextEvent(event, nextState);
+        nextState = { codeFence: rendered.codeFence };
+        for (const line of rendered.lines) console.log(line);
+        // Keep the legacy reporter in sync via the ARCH-1 adapter.
+        try {
+          createReporterAdapter(reporter as never)(event);
+        } catch {
+          // adapter is best-effort
+        }
+      }
+    : undefined;
+  // SF-7: ensure a persistent container for docker-mode sessions (best-effort).
+  try {
+    const sb = sandboxConfigFromSettings({ sandbox: loadSandboxSettings(session.repoRoot) });
+    if (sb.mode === "docker" && session.activeSession?.id) {
+      await ensurePersistentContainer(session.activeSession.id, sb);
+    }
+  } catch {
+    // sandbox is best-effort
+  }
   const agent = new Agent({
     repoRoot: session.repoRoot,
     model: info.model,
     maxIterations: session.maxIterations,
     responder,
+    providerInstance,
+    systemPrompt,
     permissions: session.permissions,
     reporter,
     todoManager: session.todoManager,
@@ -408,6 +468,11 @@ async function runTask(
     planApprover: session.planApprover,
     summarizer,
     capabilitiesOverride: modelSettings.capabilities,
+    modelRoles: roles,
+    planResponder,
+    smallModel: modelSettings.smallModel,
+    hooks: settingsHooks,
+    onEvent,
   });
   try {
     const taskStartedAt = Date.now();
@@ -424,6 +489,7 @@ async function runTask(
         input: total.input + result.usage.input,
         output: total.output + result.usage.output,
         costUsd: total.costUsd + cost,
+        cachedInput: (total.cachedInput ?? 0) + (result.usage.cachedInput ?? 0),
       };
     }
     if (result.history) {
@@ -763,6 +829,16 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
   printBanner(session);
   for (const notice of startupNotices) console.log(`  ${c.yellow(notice)}`);
   if (startupNotices.length > 0) console.log("");
+  // EX-3: SessionStart hooks fire once per REPL start (best-effort).
+  try {
+    const hooks = loadHooksSettings(session.repoRoot);
+    if (hooks.SessionStart) {
+      const { runHooks } = await import("../agent/hooks.js");
+      await runHooks(hooks, "SessionStart", { repoRoot: session.repoRoot, sessionId: session.activeSession?.id });
+    }
+  } catch {
+    // never block startup
+  }
 
   // Pad down to the bottom of the terminal window so the prompt box is fixed at the bottom rows
   const padToBottom = (linesUsed: number = 8) => {
@@ -902,6 +978,40 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
         console.log(c.dim("\n  No thinking text recorded for the latest turn."));
       }
       promptUser(true);
+      return;
+    }
+    // SF-1: Shift+Tab cycles default → acceptEdits → plan → bypass.
+    // Readline reports Shift+Tab as "\x1b[Z" (name "tab" + shift, or sequence).
+    const seq = (_str ?? "") as string;
+    if (!running && (seq === "\x1b[Z" || (key?.name === "tab" && (key as unknown as { shift?: boolean }).shift))) {
+      const next = session.permissions?.cycleMode?.() ?? "default";
+      // Keep the legacy autoApprove flag in sync for dock + status displays.
+      session.autoApprove = next === "bypass";
+      readline.cursorTo(process.stdout, 0);
+      readline.clearLine(process.stdout, 0);
+      console.log(`\n  ${pc.cyan("Permission mode:")} ${pc.bold(next)} ${pc.dim("(Shift+Tab to cycle; /mode to set)")}`);
+      try {
+        const caps = getModelCapabilities(session.model ?? process.env.MODEL);
+        void caps;
+      } catch {
+        // ignore
+      }
+      promptUser(true);
+      return;
+    }
+    // F-13: Ctrl+R history search via the pure inputHandler helper.
+    if (!running && key?.ctrl && key?.name === "r") {
+      readline.cursorTo(process.stdout, 0);
+      readline.clearLine(process.stdout, 0);
+      const hist = ((rl as unknown as { history?: string[] }).history ?? []).slice().reverse();
+      const hits = historySearch(hist, (rl as unknown as { line?: string }).line ?? "");
+      if (hits.length > 0) {
+        console.log(`\n  ${pc.cyan("History:")}\n${hits.slice(0, 5).map((h) => `    ${pc.dim("•")} ${h.slice(0, 100)}`).join("\n")}\n`);
+      } else {
+        console.log(c.dim("\n  No history matches."));
+      }
+      promptUser(true);
+      return;
     }
   };
 
@@ -1382,21 +1492,78 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
           break;
         }
         case "mode": {
+          // SF-1: full mode cycle (default/acceptEdits/plan/bypass) + legacy auto/manual.
           const targetMode = args.trim().toLowerCase();
-          if (targetMode === "auto") {
+          if (targetMode === "auto" || targetMode === "accepteds" || targetMode === "acceptedits") {
             session.autoApprove = true;
             session.permissions?.setAutoApprove(true);
             session.activeReporter?.setIsAutoMode?.(true);
             console.log(pc.green("\n  ● Switched to Auto Mode. Shell commands will run without confirmation prompts.\n"));
-          } else if (targetMode === "manual") {
+          } else if (targetMode === "manual" || targetMode === "default") {
             session.autoApprove = false;
-            session.permissions?.setAutoApprove(false);
+            session.permissions?.setMode("default");
             session.activeReporter?.setIsAutoMode?.(false);
-            console.log(pc.cyan("\n  • Switched to Manual Mode. Shell commands will prompt for confirmation.\n"));
+            console.log(pc.cyan("\n  • Switched to Manual Mode (default). Shell commands will prompt for confirmation.\n"));
+          } else if (targetMode === "acceptedits" || targetMode === "accept-edits") {
+            session.permissions?.setMode("acceptEdits");
+            session.autoApprove = false;
+            console.log(pc.green("\n  ✔ Permission mode → acceptEdits (edits auto-allow, commands ask).\n"));
+          } else if (targetMode === "plan") {
+            session.permissions?.setMode("plan");
+            console.log(pc.cyan("\n  ✻ Permission mode → plan (mutations locked).\n"));
+          } else if (targetMode === "bypass") {
+            session.permissions?.setMode("bypass");
+            session.autoApprove = true;
+            console.log(pc.yellow("\n  ⚠ Permission mode → bypass (all actions auto-approve).\n"));
+          } else if (!targetMode || targetMode === "cycle") {
+            const next = session.permissions?.cycleMode() ?? "default";
+            session.autoApprove = next === "bypass";
+            console.log(`\n  ${pc.cyan("Permission mode:")} ${pc.bold(next)} ${pc.dim("(Shift+Tab cycles)")}\n`);
           } else {
-            const current = session.permissions?.isAutoApprove() ? "auto" : "manual";
-            console.log(c.dim(`\n  Current execution mode: ${c.bold(current)} (options: /mode auto | /mode manual, or /auto, /manual)\n`));
+            const current = session.permissions?.getMode?.() ?? (session.permissions?.isAutoApprove() ? "bypass" : "default");
+            console.log(c.dim(`\n  Current permission mode: ${c.bold(String(current))} (options: /mode default | /mode acceptEdits | /mode plan | /mode bypass | /mode auto | /mode manual)\n`));
+            // F-13: validate against the registry so help stays in sync.
+            void findCommand;
+            void commandNames;
           }
+          // F-12 status line (next UI): show mode + model after switching.
+          try {
+            const info = describeProviderFromEnv(process.env, sessionOverrides(session));
+            console.log(pc.dim(`  ${renderStatusLine({ model: info.model, mode: String(session.permissions?.getMode?.() ?? "default"), sandbox: getSandboxMode() })}`));
+          } catch {
+            // ignore
+          }
+          break;
+        }
+        case "mcp": {
+          // EX-1: /mcp lists servers + tools (manager merges global + project).
+          const { loadMcpServers, listAllMcpTools } = await import("../mcp/manager.js");
+          const sub = args.trim().toLowerCase();
+          if (sub.startsWith("add") || sub.startsWith("remove")) {
+            console.log(c.dim("  Use `codeagent mcp add <name> -- <cmd>` / `codeagent mcp remove <name>` from the shell (settings are file-based)."));
+            break;
+          }
+          const servers = await loadMcpServers(session.repoRoot).catch(() => ({}));
+          const names = Object.keys(servers);
+          if (names.length === 0) {
+            console.log(c.dim("  No MCP servers configured. Add one in .codeagent/settings.json `mcpServers`, or `codeagent mcp add <name> -- <cmd>`."));
+            break;
+          }
+          console.log(pc.bold("\n  MCP servers:"));
+          for (const n of names) console.log(`    ${pc.cyan(n)}`);
+          try {
+            const tools = await listAllMcpTools(session.repoRoot);
+            if (tools.length > 0) {
+              console.log(pc.bold(`\n  MCP tools (${tools.length}):`));
+              for (const t of tools.slice(0, 50)) console.log(`    ${pc.dim(t.namespaced)}${t.description ? ` — ${t.description.slice(0, 80)}` : ""}`);
+              console.log(c.dim("\n  Call as mcp__<server>__<tool>; per-tool rules: MCP(server:tool) in settings permissions."));
+            } else {
+              console.log(c.dim("  (no tools reachable — servers may be offline)"));
+            }
+          } catch {
+            console.log(c.dim("  (tool listing failed — servers may be offline)"));
+          }
+          console.log("");
           break;
         }
         case "todos":
@@ -1479,6 +1646,12 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
         case "quit":
           clearBottomBox();
           console.log(c.dim("Bye."));
+          // SF-7: best-effort persistent-container cleanup on exit.
+          try {
+            if (session.activeSession?.id) await removePersistentContainer(session.activeSession.id);
+          } catch {
+            // ignore
+          }
           if (process.stdin.isTTY) {
             process.stdin.removeListener("keypress", onKeypress);
           }
@@ -1487,13 +1660,52 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
           }
           rl.close();
           return;
-        default:
-          console.log(c.yellow(`Unknown command /${cmd}. Try /help.`));
+        default: {
+          // F-13: unknown slash → suggest closest registry entry (fuzzy).
+          // EX-2: fall through to project/global custom commands (*.md).
+          const known = commandNames();
+          void transitionForCommand;
+          if (!findCommand(cmd)) {
+            try {
+              const { loadCustomCommands, expandCustomCommand } = await import("./commands.js");
+              const customs = await loadCustomCommands(session.repoRoot);
+              const hit = customs.find((cc) => cc.name.toLowerCase() === cmd.toLowerCase());
+              if (hit) {
+                const expanded = await expandCustomCommand(session.repoRoot, hit.prompt, args);
+                console.log(pc.dim(`  Running custom command /${hit.name} from ${hit.source}`));
+                // Run the expanded prompt as a task (checkpoint + history handled below).
+                trimmed = expanded;
+                // Fall out of the slash switch into the task path.
+                break;
+              }
+            } catch {
+              // custom commands are best-effort
+            }
+          }
+          if (trimmed.startsWith("/") && trimmed === line.trim()) {
+            // Still a slash command: report unknown with a hint.
+            const hint = known.filter((n) => n.startsWith(cmd.slice(0, 2))).slice(0, 3).join(", ");
+            console.log(c.yellow(`Unknown command /${cmd}. Try /help.${hint ? ` Did you mean: ${hint}?` : ""}`));
+            promptUser();
+            continue;
+          }
+          // Expanded custom command becomes the task text.
           break;
+        }
       }
-      promptUser();
-      continue;
+      // A custom /command expansion replaces the task text; slash-only
+      // unknowns already continued above.
+      if (slash && trimmed.startsWith("/") && parseSlashCommand(trimmed)) {
+        promptUser();
+        continue;
+      }
     }
+
+    // F-13 input helpers: collapse huge pastes for display, keep full text for the run.
+    if (trimmed.length > 2000) {
+      console.log(pc.dim(`  ${collapseLargePaste(trimmed, 2000).split("\n")[0]}`));
+    }
+    void shouldSubmitOnEnter;
 
     // Plain text = a task. Take a per-turn checkpoint (SS-1) so /undo and
     // /rewind can restore code; the turn (history delta) is appended in runTask.

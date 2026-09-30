@@ -1,0 +1,29 @@
+{
+  "name": "codeagent-vscode",
+  "displayName": "CodeAgent",
+  "description": "Drive CodeAgent over stdio via the ACP bridge (codeagent --acp).",
+  "version": "0.7.0",
+  "publisher": "codeagent",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["AI", "Other"],
+  "main": "./extension.js",
+  "activationEvents": ["onCommand:codeagent.runTask", "onCommand:codeagent.cancelTask"],
+  "contributes": {
+    "commands": [
+      {
+        "command": "codeagent.runTask",
+        "title": "CodeAgent: Run Task"
+      },
+      {
+        "command": "codeagent.cancelTask",
+        "title": "CodeAgent: Cancel Task"
+      }
+    ]
+  },
+  "scripts": {
+    "vscode:package": "npx -y @vscode/vsce package --no-yarn"
+  }
+}

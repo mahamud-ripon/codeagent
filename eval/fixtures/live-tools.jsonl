@@ -1,0 +1,27 @@
+{"meta":true,"provider":"openai-chat","model":"Qwen3.8-27B","promptVersion":"codeagent-prompt/2.0","at":"2026-09-30T09:24:25.889Z","note":"tools:true tool_call folding, no finish_reason from proxy"}
+{"type":"thinking_delta","text":"The"}
+{"type":"thinking_delta","text":" user"}
+{"type":"thinking_delta","text":" is"}
+{"type":"thinking_delta","text":" asking"}
+{"type":"thinking_delta","text":" to"}
+{"type":"thinking_delta","text":" read"}
+{"type":"thinking_delta","text":" '"}
+{"type":"thinking_delta","text":"src"}
+{"type":"thinking_delta","text":"/index"}
+{"type":"thinking_delta","text":".ts"}
+{"type":"thinking_delta","text":"'"}
+{"type":"thinking_delta","text":" using"}
+{"type":"thinking_delta","text":" the"}
+{"type":"thinking_delta","text":" read"}
+{"type":"thinking_delta","text":" tool"}
+{"type":"thinking_delta","text":"."}
+{"type":"thinking_delta","text":"\n"}
+{"type":"text_delta","text":"\n\n"}
+{"type":"tool_call_start","id":"call_7bbb206b09634805a949b97f","name":"read"}
+{"type":"tool_call_delta","id":"call_7bbb206b09634805a949b97f","argumentsDelta":"{"}
+{"type":"tool_call_delta","id":"call_7bbb206b09634805a949b97f","argumentsDelta":"\"path\": \"src/index.ts\""}
+{"type":"tool_call_delta","id":"call_7bbb206b09634805a949b97f","argumentsDelta":"}"}
+{"type":"tool_call_end","id":"call_7bbb206b09634805a949b97f","name":"read","arguments":"{\"path\": \"src/index.ts\"}"}
+{"type":"stop","finishReason":"tool_calls"}
+{"type":"usage","input":3851,"output":45}
+{"type":"usage","input":3851,"output":45}

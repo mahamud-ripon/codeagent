@@ -25,11 +25,15 @@ function environmentBlock(): string {
  * Build the one-shot context injected before the user request:
  * repo map + scripts + phase-0 guidance + project rules. Everything else is
  * retrieved progressively via tools (never dump the whole repo).
+ * AG-16: when a task query is provided, a ranked top-files section focuses
+ * the model on likely-relevant paths instead of the flat 2,000-file list.
+ * EX-4: skill descriptions are always in context; bodies load on demand.
  */
 export async function buildInitialContext(
   repoRoot: string,
   rules: LoadedRule[] = [],
   memory: LoadedRule[] = [],
+  query?: string,
 ): Promise<string> {
   const map = await buildRepoMap(repoRoot);
   const lines = [
@@ -43,6 +47,22 @@ export async function buildInitialContext(
     "Follow the EXPLORE -> IMPLEMENT -> VERIFY -> REVIEW workflow from the system prompt.",
   ];
 
+  // Ranked focus (AG-16): cheap term-overlap scoring, no native deps.
+  if (query?.trim()) {
+    try {
+      const { rankedRepoMap } = await import("../repo/rankedMap.js");
+      const files = map.files.split("\n").filter(Boolean).slice(0, 2000).map((p) => ({ path: p, sizeKb: 10 }));
+      const top = await rankedRepoMap(repoRoot, query, files, 30);
+      if (top.length > 0) {
+        lines.push("", `<ranked_files query="${query.slice(0, 120).replace(/"/g, "")}">`);
+        for (const f of top.slice(0, 30)) lines.push(`- ${f.path} (score ${f.score})`);
+        lines.push("</ranked_files>");
+      }
+    } catch {
+      // ranked map is best-effort; flat map above still applies
+    }
+  }
+
   if (memory.length > 0) {
     lines.push("");
     lines.push(formatMemoryForContext(memory));
@@ -51,6 +71,19 @@ export async function buildInitialContext(
   if (rules.length > 0) {
     lines.push("");
     lines.push(formatRulesForContext(rules));
+  }
+
+  // Skills (EX-4): descriptions always in context.
+  try {
+    const { loadSkills, skillContextBlock } = await import("./skills.js");
+    const skills = await loadSkills(repoRoot);
+    const block = skillContextBlock(skills);
+    if (block) {
+      lines.push("");
+      lines.push(block);
+    }
+  } catch {
+    // skills are best-effort
   }
 
   return lines.join("\n");

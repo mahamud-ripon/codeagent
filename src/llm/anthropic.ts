@@ -3,8 +3,9 @@ import type { Provider } from "./stream.js";
 import { getModelCapabilities } from "./capabilities.js";
 import { withProviderRetry } from "./retry.js";
 import { toChatTools } from "./tools.js";
-import { responsesHistoryToChatMessages } from "./chatProvider.js";
+import { extractHistorySystems, responsesHistoryToChatMessages } from "./chatProvider.js";
 import { streamChatChunks, type ChatStreamChunk } from "./stream.js";
+import { orderPrefixParts, supportsPromptCaching, withAnthropicCacheBreakpoints } from "./cache.js";
 
 interface AnthropicStreamChunk {
   type: string;
@@ -98,6 +99,9 @@ function toAnthropicTools(): Array<{ name: string; description?: string; input_s
 }
 
 function toAnthropicMessages(input: unknown[]): Array<{ role: string; content: unknown }> {
+  // Stable prefix order (ML-9): system → tools → memory → history is already
+  // the agent's construction order; keep it explicit so cache hits are stable.
+  void orderPrefixParts;
   const chat = responsesHistoryToChatMessages(input);
   return chat
     .filter((m) => m.role !== "system")
@@ -111,6 +115,11 @@ function toAnthropicMessages(input: unknown[]): Array<{ role: string; content: u
         if (a.tool_calls?.length) {
           const blocks: unknown[] = [];
           if (typeof a.content === "string" && a.content) blocks.push({ type: "text", text: a.content });
+          else if (Array.isArray(a.content)) {
+            for (const p of a.content as Array<{ type?: string; text?: string }>) {
+              if (typeof p?.text === "string" && p.text) blocks.push({ type: "text", text: p.text });
+            }
+          }
           for (const tc of a.tool_calls) {
             let parsed: unknown = {};
             try { parsed = JSON.parse(tc.function.arguments); } catch { parsed = {}; }
@@ -118,25 +127,38 @@ function toAnthropicMessages(input: unknown[]): Array<{ role: string; content: u
           }
           return { role: "assistant", content: blocks };
         }
+        // Forward image blocks when the chat translator preserved them.
+        if (Array.isArray(a.content)) return { role: "assistant", content: a.content };
+      }
+      // User content may be a string or a mixed text/image array (AG-15).
+      // Anthropic expects [{type:"text"}|{type:"image"}]; pass through blocks.
+      if (Array.isArray((m as { content?: unknown }).content)) {
+        return { role: m.role, content: (m as { content: unknown }).content };
       }
       return { role: m.role, content: m.content };
     });
 }
 
 /** Parse an SSE byte stream into JSON payloads (used by Anthropic/Gemini/Responses). */
-export async function* parseSseStream(stream: ReadableStream<Uint8Array> | AsyncIterable<string>): AsyncGenerator<{ event: string; data: unknown }> {
+export async function* parseSseStream(stream: ReadableStream<Uint8Array> | AsyncIterable<string | Uint8Array>): AsyncGenerator<{ event: string; data: unknown }> {
   const textChunks: string[] = [];
+  // Node 22 web streams expose Symbol.asyncIterator yielding Uint8Array
+  // chunks — String(chunk) would emit "104,101,..." and silently drop every
+  // frame, so byte chunks must go through TextDecoder (live-SSE fix).
+  const decoder = new TextDecoder();
   if (Symbol.asyncIterator in Object(stream)) {
-    for await (const part of stream as AsyncIterable<string>) textChunks.push(String(part));
+    for await (const part of stream as AsyncIterable<string | Uint8Array>) {
+      textChunks.push(typeof part === "string" ? part : decoder.decode(part, { stream: true }));
+    }
+    textChunks.push(decoder.decode());
   } else {
     const reader = (stream as ReadableStream<Uint8Array>).getReader();
-    const decoder = new TextDecoder();
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
       textChunks.push(decoder.decode(value, { stream: true }));
     }
-    textChunks.push(new TextDecoder().decode());
+    textChunks.push(decoder.decode());
   }
   const raw = textChunks.join("");
   const blocks = raw.split(/\n\n+/);
@@ -173,9 +195,25 @@ export function createAnthropicProvider(opts: AnthropicProviderOptions): Provide
   return {
     capabilities: getModelCapabilities(opts.model),
     async *stream(req: StreamRequest): AsyncGenerator<ProviderEvent> {
+      // History systems (repo context, memory) were previously dropped by
+      // toAnthropicMessages — fold them into the request system string so
+      // the model actually sees them (ML-9 stable prefix, second position).
+      const historySystems = extractHistorySystems(
+        responsesHistoryToChatMessages(req.messages) as Array<{ role?: string; content?: unknown }>,
+      );
+      const reqSystem = [req.system, ...historySystems].filter(Boolean).join("\n\n");
+      const combinedSystem = [opts.systemPrompt, reqSystem].filter(Boolean).join("\n\n") || undefined;
+      // ML-9: stable prefix + cache breakpoints for models that support it.
+      let system: unknown = combinedSystem;
+      if (combinedSystem && supportsPromptCaching(opts.model)) {
+        // Split provider system vs request system so the stable prefix
+        // (system prompt) can be cached separately from per-turn history.
+        const parts = [opts.systemPrompt, reqSystem].filter(Boolean).map((t) => ({ text: String(t) }));
+        system = withAnthropicCacheBreakpoints(parts, 2);
+      }
       const body = {
         model: opts.model,
-        system: [opts.systemPrompt, req.system].filter(Boolean).join("\n\n") || undefined,
+        system,
         messages: toAnthropicMessages(req.messages),
         tools: req.tools ? toAnthropicTools() : undefined,
         stream: true,

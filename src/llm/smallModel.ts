@@ -2,7 +2,7 @@ import type { ModelSettings } from "../agent/settings.js";
 
 /** Small-model mode (ML-4): cheap/free models get a short prompt, fewer tools, JSON repair. */
 
-const SMALL_MODEL_PATTERNS = [/gpt-oss/i, /mini/i, /haiku/i, /3\.5/i, /7b/i, /8b/i, /13b/i, /qwen.*(7b|8b|14b)/i, /llama.*8b/i];
+const SMALL_MODEL_PATTERNS = [/gpt-oss/i, /mini/i, /haiku/i, /3\.5/i, /(^|[^0-9])7b/i, /(^|[^0-9])8b/i, /(^|[^0-9])13b/i, /qwen[^0-9]*(7b|8b|14b)/i, /llama[^0-9]*8b/i];
 
 export function isSmallModel(model: string | undefined): boolean {
   if (!model) return false;

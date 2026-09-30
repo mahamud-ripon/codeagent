@@ -39,4 +39,19 @@ describe("getQuickDiagnostics", () => {
     const diag = await getQuickDiagnostics(tmp, "notes.txt");
     expect(diag).toBeNull();
   });
+
+  it("returns null for clean, valid Python files (no false positive from ruff clean exit)", async () => {
+    const cleanPy = "def add(a: int, b: int) -> int:\n    return a + b\n";
+    await fs.writeFile(path.join(tmp, "clean.py"), cleanPy, "utf8");
+    const diag = await getQuickDiagnostics(tmp, "clean.py");
+    expect(diag).toBeNull();
+  });
+
+  it("detects syntax errors in broken Python files", async () => {
+    const brokenPy = "def add(a, b):\nreturn a + b\n";
+    await fs.writeFile(path.join(tmp, "broken.py"), brokenPy, "utf8");
+    const diag = await getQuickDiagnostics(tmp, "broken.py");
+    expect(diag).not.toBeNull();
+    expect(diag).toMatch(/Ruff|Python Syntax Error/);
+  });
 });

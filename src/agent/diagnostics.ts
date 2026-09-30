@@ -15,12 +15,25 @@ export interface DiagnosticResult {
 /**
  * Checks for syntax and compiler errors on an edited or written TypeScript/JavaScript file.
  * Fast, non-blocking (max 3s timeout), returns null if clean or unsupported.
+ * AG-10: extends beyond tsc to eslint, ruff/pyright, go vet, cargo check.
  */
 export async function getQuickDiagnostics(
   repoRoot: string,
   filePath: string,
 ): Promise<string | null> {
   const ext = path.extname(filePath).toLowerCase();
+  // Python: ruff / pyright when available (best-effort, 3s each).
+  if (ext === ".py") {
+    return getPythonDiagnostics(repoRoot, filePath);
+  }
+  // Go: go vet on the owning package (best-effort).
+  if (ext === ".go") {
+    return getGoDiagnostics(repoRoot, filePath);
+  }
+  // Rust: cargo check filtered to the file (best-effort).
+  if (ext === ".rs") {
+    return getRustDiagnostics(repoRoot, filePath);
+  }
   if (![".ts", ".tsx", ".js", ".jsx"].includes(ext)) {
     return null;
   }
@@ -115,9 +128,93 @@ export async function getQuickDiagnostics(
       if (relevantErrors.length > 0) {
         return `⚠️ Compiler Type Diagnostics:\n${relevantErrors.join("\n")}`;
       }
+      // AG-10: eslint is the JS-side lint complement to tsc (best-effort).
+      try {
+        const hasEslint = await fs.stat(path.join(repoRoot, "node_modules", "eslint")).then(() => true).catch(() => false);
+        if (hasEslint) {
+          const { stdout } = await execAsync(`npx --no-install eslint ${JSON.stringify(filePath)} --format unix`, {
+            cwd: repoRoot,
+            timeout: 3000,
+            maxBuffer: 512 * 1024,
+          }).catch((e: unknown) => ({ stdout: (e as { stdout?: string }).stdout ?? "" }));
+          const eslintLines = String(stdout ?? "").split("\n").map((l) => l.trim()).filter(Boolean).slice(0, 4);
+          if (eslintLines.length > 0) return `⚠️ ESLint:\n${eslintLines.map((l) => `  - ${l}`).join("\n")}`;
+        }
+      } catch {
+        // eslint not installed — ignore
+      }
       return null;
     }
   } catch {
     return null;
   }
+}
+
+async function runBestEffort(cmd: string, repoRoot: string, timeoutMs = 3000): Promise<string | null> {
+  try {
+    await execAsync(cmd, { cwd: repoRoot, timeout: timeoutMs, maxBuffer: 512 * 1024 });
+    // Exit code 0 indicates success / no compiler or lint errors.
+    // Clean output (e.g. "All checks passed!") must NEVER be treated as an error.
+    return null;
+  } catch (e: unknown) {
+    const err = e as { stdout?: string; stderr?: string; killed?: boolean };
+    if (err.killed) return null;
+    const out = [err.stdout, err.stderr].filter(Boolean).join("\n").trim();
+    if (!out) return null;
+    // If the command failed because the tool is not installed or command not found, ignore it.
+    if (
+      /not recognized as an internal or external command/i.test(out) ||
+      /is not recognized as the name of a cmdlet/i.test(out) ||
+      /command not found/i.test(out) ||
+      /cannot find the file specified/i.test(out) ||
+      /No such file or directory/i.test(out)
+    ) {
+      return null;
+    }
+    const lines = out
+      .split("\n")
+      .map((l) => l.trim())
+      .filter((l) => l && !/all checks passed/i.test(l) && !/^0 errors/i.test(l))
+      .slice(0, 4);
+    if (lines.length === 0) return null;
+    return lines.map((l) => `  - ${l}`).join("\n");
+  }
+}
+
+/** AG-10: Python diagnostics via ruff, falling back to python -m py_compile. */
+async function getPythonDiagnostics(repoRoot: string, filePath: string): Promise<string | null> {
+  const abs = resolveInsideRepo(repoRoot, filePath);
+  try {
+    await fs.readFile(abs, "utf8");
+  } catch {
+    return null;
+  }
+  // 1. Try ruff check (fastest linter/syntax checker)
+  const ruff = await runBestEffort(`ruff check ${JSON.stringify(filePath)}`, repoRoot);
+  if (ruff) return `⚠️ Ruff:\n${ruff}`;
+
+  // 2. Built-in Python syntax compilation check
+  const pyCompile = await runBestEffort(`python -m py_compile ${JSON.stringify(filePath)}`, repoRoot);
+  if (pyCompile) return `⚠️ Python Syntax Error:\n${pyCompile}`;
+
+  return null;
+}
+
+/** AG-10: Go diagnostics via go vet on the file's directory. */
+async function getGoDiagnostics(repoRoot: string, filePath: string): Promise<string | null> {
+  const dir = path.dirname(resolveInsideRepo(repoRoot, filePath));
+  const relDir = path.relative(repoRoot, dir) || ".";
+  const out = await runBestEffort(`go vet ./${relDir.replace(/\\/g, "/")}`, repoRoot);
+  if (out) return `⚠️ go vet:\n${out}`;
+  return null;
+}
+
+/** AG-10: Rust diagnostics via cargo check, filtered to the file. */
+async function getRustDiagnostics(repoRoot: string, filePath: string): Promise<string | null> {
+  const out = await runBestEffort(`cargo check --message-format short`, repoRoot, 5000);
+  if (!out) return null;
+  const base = path.basename(filePath).toLowerCase();
+  const hits = out.split("\n").filter((l) => l.toLowerCase().includes(base)).slice(0, 4);
+  const shown = (hits.length ? hits : out.split("\n").slice(0, 4)).map((l) => `  - ${l}`).join("\n");
+  return shown ? `⚠️ cargo check:\n${shown}` : null;
 }

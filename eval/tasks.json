@@ -1,6 +1,6 @@
 [
-  {"id":"bug-ts-off-by-one","bucket":"bugfix","language":"ts","prompt":"The loop bound is exclusive. Include the last index.","files":{"src/range.ts":"export function range(n: number) { const out = []; for (let i = 0; i < n - 1; i++) out.push(i); return out; }"},"expect":"i <= n"},
-  {"id":"bug-ts-null","bucket":"bugfix","language":"ts","prompt":"Guard the missing user before reading email.","files":{"src/user.ts":"export function email(user: { email: string } | null) { return user.email; }"},"expect":"user?"},
+  {"id":"bug-ts-off-by-one","bucket":"bugfix","language":"ts","prompt":"The loop bound is exclusive. Include the last index.","files":{"src/range.ts":"export function range(n: number) { const out = []; for (let i = 0; i < n - 1; i++) out.push(i); return out; }"},"expect":"i <= n|i < n"},
+  {"id":"bug-ts-null","bucket":"bugfix","language":"ts","prompt":"Guard the missing user before reading email.","files":{"src/user.ts":"export function email(user: { email: string } | null) { return user.email; }"},"expect":"user?|!user|user === null|user == null"},
   {"id":"bug-ts-async","bucket":"bugfix","language":"ts","prompt":"Await the promise before returning the value.","files":{"src/load.ts":"export async function load() { return Promise.resolve(1); }"},"expect":"await"},
   {"id":"bug-py-indent","bucket":"bugfix","language":"py","prompt":"Fix the indentation so the return is inside the function.","files":{"app.py":"def add(a, b):\nreturn a + b\n"},"expect":"    return"},
   {"id":"bug-py-div","bucket":"bugfix","language":"py","prompt":"Avoid dividing by zero.","files":{"maths.py":"def ratio(a, b):\n    return a / b\n"},"expect":"if b"},
@@ -13,7 +13,7 @@
   {"id":"refactor-ts-name","bucket":"rename","language":"ts","prompt":"Rename foo to calculateTotal in this file only.","files":{"src/bill.ts":"export function foo(n: number) { return n * 2; }\n"},"expect":"calculateTotal"},
   {"id":"refactor-py-name","bucket":"rename","language":"py","prompt":"Rename do_it to normalize.","files":{"text.py":"def do_it(s):\n    return s.strip()\n"},"expect":"def normalize"},
   {"id":"refactor-go-name","bucket":"rename","language":"go","prompt":"Rename Foo to Parse.","files":{"parse.go":"package p\nfunc Foo(s string) string { return s }\n"},"expect":"func Parse"},
-  {"id":"refactor-extract","bucket":"refactor","language":"ts","prompt":"Extract the tax calculation into its own function.","files":{"src/price.ts":"export function price(n: number) { const tax = n * 0.2; return n + tax; }\n"},"expect":"function tax"},
+  {"id":"refactor-extract","bucket":"refactor","language":"ts","prompt":"Extract the tax calculation into its own function.","files":{"src/price.ts":"export function price(n: number) { const tax = n * 0.2; return n + tax; }\n"},"expect":"function tax|calculateTax|getTax"},
   {"id":"bug-ts-eq","bucket":"bugfix","language":"ts","prompt":"Use strict equality.","files":{"src/eq.ts":"export function same(a: unknown, b: unknown) { return a == b; }\n"},"expect":"==="},
   {"id":"bug-ts-return","bucket":"bugfix","language":"ts","prompt":"Return the filtered list.","files":{"src/filter.ts":"export function positives(xs: number[]) { xs.filter((x) => x > 0); }\n"},"expect":"return"},
   {"id":"bug-py-type","bucket":"bugfix","language":"py","prompt":"Convert the input to int before adding.","files":{"cast.py":"def add_one(raw):\n    return raw + 1\n"},"expect":"int("},

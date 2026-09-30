@@ -3,5 +3,6 @@
   "tasks": 36,
   "ok": true,
   "errors": [],
+  "promptVersion": "codeagent-prompt/2.0",
   "note": "Live model scores need EVAL_LIVE=1 and an API key. This smoke run checks the task set only."
 }

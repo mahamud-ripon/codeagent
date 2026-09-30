@@ -5,3 +5,4 @@ The smoke runner validates the task set. Run `npm run eval` in CI.
 Set `EVAL_LIVE=1` when a provider is available to score the same tasks against a model.
 
 Smoke: 36 tasks, ok=true.
+Prompt version: codeagent-prompt/2.0 (compare with eval/results/live.json after a live run; a mismatch means the baseline is stale).

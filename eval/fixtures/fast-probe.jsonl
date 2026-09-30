@@ -1,0 +1,6 @@
+{"meta":true,"provider":"openai-chat","model":"Qwen3.8-27B","promptVersion":"codeagent-prompt/2.0","at":"2026-09-30T07:51:00.434Z"}
+{"type":"text_delta","text":"\n\n"}
+{"type":"text_delta","text":"OK"}
+{"type":"stop","finishReason":"stop"}
+{"type":"usage","input":1171,"output":23}
+{"type":"usage","input":1171,"output":23}

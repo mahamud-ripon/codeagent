@@ -53,13 +53,19 @@ export function runSpawn(
   opts: SpawnRunOptions = {},
 ): Promise<{ jobId?: string; output: string; exitCode: number }> {
   const timeoutMs = opts.timeoutMs ?? 120_000;
-  const shell = process.platform === "win32" ? "cmd.exe" : "sh";
-  const shellArgs = process.platform === "win32" ? ["/d", "/s", "/c", command] : ["-c", command];
+  const isWin = process.platform === "win32";
+  const shell = isWin ? "cmd.exe" : "sh";
+  const shellArgs = isWin ? ["/d", "/s", "/c", `"${command}"`] : ["-c", command];
+  const spawnOpts = {
+    cwd: repoRoot,
+    windowsHide: true,
+    windowsVerbatimArguments: isWin,
+  };
 
   if (opts.background) {
     const id = `bg_${Date.now().toString(36)}_${counter++}`;
     const job: BgJob = { id, command, output: "", done: false, startedAt: Date.now() };
-    const proc = spawn(shell, shellArgs, { cwd: repoRoot, windowsHide: true, detached: process.platform !== "win32" });
+    const proc = spawn(shell, shellArgs, { ...spawnOpts, detached: !isWin });
     job.proc = proc;
     proc.stdout?.on("data", (d: Buffer) => { job.output += d.toString(); opts.onChunk?.(d.toString()); });
     proc.stderr?.on("data", (d: Buffer) => { job.output += d.toString(); opts.onChunk?.(d.toString()); });
@@ -71,7 +77,7 @@ export function runSpawn(
   }
 
   return new Promise((resolve, reject) => {
-    const proc = spawn(shell, shellArgs, { cwd: repoRoot, windowsHide: true });
+    const proc = spawn(shell, shellArgs, spawnOpts);
     let output = "";
     const timer = setTimeout(() => {
       killTree(proc);

@@ -84,6 +84,72 @@ function nonEmptyString(value: unknown): string | undefined {
 }
 
 /**
+ * EX-3 wiring: load user hooks (SessionStart/UserPromptSubmit/PreToolUse/
+ * PostToolUse/Stop/PreCompact) from the same three settings files.
+ * Later files append; matchers run in file order. Never throws.
+ */
+export function loadHooksSettings(
+  repoRoot: string,
+  homeDir: string = os.homedir(),
+): import("./hooks.js").HookConfig {
+  const files = [
+    path.join(homeDir, ".codeagent", "settings.json"),
+    path.join(repoRoot, ".codeagent", "settings.json"),
+    path.join(repoRoot, ".codeagent", "settings.local.json"),
+  ];
+  const merged: import("./hooks.js").HookConfig = {};
+  for (const file of files) {
+    if (!fs.existsSync(file)) continue;
+    const json = readJson(file);
+    const hooks = (json?.hooks ?? {}) as Record<string, unknown>;
+    if (!hooks || typeof hooks !== "object") continue;
+    for (const [name, defs] of Object.entries(hooks)) {
+      if (!Array.isArray(defs)) continue;
+      const list = defs
+        .filter((d): d is Record<string, unknown> => !!d && typeof d === "object")
+        .map((d) => ({
+          matcher: typeof d.matcher === "string" ? d.matcher : undefined,
+          command: String((d as { command?: unknown }).command ?? ""),
+        }))
+        .filter((d) => d.command.trim().length > 0);
+      if (list.length === 0) continue;
+      const key = name as keyof import("./hooks.js").HookConfig;
+      merged[key] = [...(merged[key] ?? []), ...list];
+    }
+  }
+  return merged;
+}
+
+/**
+ * SF-7 wiring: sandbox config (mode/image/network/mounts) from settings.
+ * Last-file-wins per key; env SANDBOX_IMAGE is the image fallback.
+ */
+export function loadSandboxSettings(
+  repoRoot: string,
+  homeDir: string = os.homedir(),
+): { mode?: "local" | "docker"; image?: string; network?: boolean; mounts?: string[] } {
+  const files = [
+    path.join(homeDir, ".codeagent", "settings.json"),
+    path.join(repoRoot, ".codeagent", "settings.json"),
+    path.join(repoRoot, ".codeagent", "settings.local.json"),
+  ];
+  const merged: { mode?: "local" | "docker"; image?: string; network?: boolean; mounts?: string[] } = {};
+  for (const file of files) {
+    if (!fs.existsSync(file)) continue;
+    const json = readJson(file);
+    const sb = json?.sandbox as Record<string, unknown> | undefined;
+    if (!sb || typeof sb !== "object") continue;
+    if (sb.mode === "local" || sb.mode === "docker") merged.mode = sb.mode;
+    if (typeof sb.image === "string" && sb.image.trim()) merged.image = sb.image.trim();
+    if (typeof sb.network === "boolean") merged.network = sb.network;
+    if (Array.isArray(sb.mounts)) {
+      merged.mounts = (sb.mounts as unknown[]).filter((m): m is string => typeof m === "string");
+    }
+  }
+  return merged;
+}
+
+/**
  * Merge `model` role settings from the same three settings files as
  * permissions. Later files win for main/fast/plan; capability fields merge
  * per key with the same last-file-wins rule.

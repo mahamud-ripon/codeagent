@@ -6,7 +6,7 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { Agent } from "./agent/agent.js";
 import { PermissionManager } from "./agent/permissions.js";
-import { loadPermissionSettings } from "./agent/settings.js";
+import { loadHooksSettings, loadModelSettings, loadPermissionSettings, loadSandboxSettings } from "./agent/settings.js";
 import { exitCodeForStopReason, parseOutputFormat, renderJsonResult, type OutputFormat } from "./cli/headless.js";
 import type { AgentEvent } from "./llm/events.js";
 import { createProviderFromEnv } from "./llm/provider.js";
@@ -38,7 +38,7 @@ Usage:
 Options:
   --repo <path>           Repository root (default: cwd)
   -m, --model <id>        Model (default: $MODEL or ${defaultModel})
-  -p, --provider <name>   LLM backend: openai (Responses) or chat (Completions)
+  -p, --provider <name>   LLM backend: openai (Responses SSE) | chat (Completions) | anthropic | gemini
   -e, --endpoint <url>    OpenAI-compatible base URL (implies chat provider)
   -i, --iterations <n>    Max agent iterations (alias of --max-iterations)
   --max-iterations <n>    Max agent iterations (default: $MAX_ITERATIONS or 30)
@@ -250,7 +250,7 @@ async function runOneShot(
   })) {
     console.log(pc.yellow(notice));
   }
-  const { responder, info } = createProviderFromEnv(process.env, {
+  const { responder, info, providerInstance, systemPrompt } = createProviderFromEnv(process.env, {
     model: opts.model,
     provider: opts.provider,
     baseURL: opts.baseURL,
@@ -272,6 +272,8 @@ async function runOneShot(
   });
 
   const settings = loadPermissionSettings(repoRoot);
+  const modelSettings = loadModelSettings(repoRoot);
+  const hooks = loadHooksSettings(repoRoot);
   const bypass = opts.autoApprove === true;
   const permissions = new PermissionManager({
     autoApprove: bypass,
@@ -280,6 +282,30 @@ async function runOneShot(
     deny: settings.deny,
     ask: settings.ask,
   });
+  // ML-5: plan-role responder for headless plan-mode runs.
+  const { resolveRoles } = await import("./llm/modelRouting.js");
+  const roles = resolveRoles(modelSettings, info.model);
+  let planResponder: import("./llm/client.js").Responder | undefined;
+  if (roles.plan && roles.plan !== info.model) {
+    try {
+      planResponder = createProviderFromEnv(process.env, {
+        model: roles.plan,
+        provider: opts.provider,
+        baseURL: opts.baseURL,
+      }).responder;
+    } catch {
+      planResponder = undefined;
+    }
+  }
+  // EX-3: UserPromptSubmit fires before the headless task (best-effort).
+  if (hooks.UserPromptSubmit) {
+    try {
+      const { runHooks } = await import("./agent/hooks.js");
+      await runHooks(hooks, "UserPromptSubmit", { prompt: task.slice(0, 4000) });
+    } catch {
+      // ignore
+    }
+  }
   const reporter = quiet ? undefined : new ConsoleAgentReporter(repoRoot);
   const onEvent = opts.outputFormat === "stream-json"
     ? (event: AgentEvent) => {
@@ -292,12 +318,28 @@ async function runOneShot(
     model: info.model,
     maxIterations: opts.maxIterations,
     responder,
+    providerInstance,
+    systemPrompt,
     reporter,
     permissions,
     provider: opts.provider,
     baseURL: opts.baseURL,
     autoApprove: bypass,
     onEvent,
+    summarizer: roles.fast && roles.fast !== info.model
+      ? (() => {
+          try {
+            return createProviderFromEnv(process.env, { model: roles.fast, provider: opts.provider, baseURL: opts.baseURL }).responder;
+          } catch {
+            return undefined;
+          }
+        })()
+      : undefined,
+    capabilitiesOverride: modelSettings.capabilities,
+    modelRoles: roles,
+    planResponder,
+    smallModel: modelSettings.smallModel,
+    hooks,
   });
   try {
     const startedAt = Date.now();
@@ -366,6 +408,42 @@ async function main(): Promise<void> {
     return;
   }
 
+  // EX-5: plugin bundles (codeagent plugin <install|list|remove>).
+  // `mcp` is parsed as mcpArgs above; plugin uses the same trailing-args shape.
+  const rawArgv = process.argv.slice(2);
+  if (rawArgv[0] === "plugin") {
+    const { installPlugin, listPlugins, removePlugin } = await import("./extensions/plugins.js");
+    const sub = rawArgv[1];
+    if (sub === "list") {
+      const names = await listPlugins();
+      console.log(names.length ? `Plugins (${names.length}):\n${names.map((n) => `  - ${n}`).join("\n")}` : "No plugins installed (~/.codeagent/plugins).");
+      return;
+    }
+    if (sub === "install") {
+      const url = rawArgv[2];
+      const name = rawArgv[3];
+      if (!url) {
+        console.error("Usage: codeagent plugin install <git-url> [name]");
+        process.exit(4);
+      }
+      const dir = await installPlugin(url, name);
+      console.log(`Installed plugin → ${dir}`);
+      return;
+    }
+    if (sub === "remove" || sub === "uninstall" || sub === "rm") {
+      const name = rawArgv[2];
+      if (!name) {
+        console.error("Usage: codeagent plugin remove <name>");
+        process.exit(4);
+      }
+      await removePlugin(name);
+      console.log(`Removed plugin "${name}".`);
+      return;
+    }
+    console.log("Usage: codeagent plugin <install|list|remove>");
+    return;
+  }
+
   if (args.showSessions) {
     const list = listSessions(repoRoot);
     if (list.length === 0) {
@@ -382,9 +460,15 @@ async function main(): Promise<void> {
 
   // Apply the sandbox preference up-front (health check included) so both
   // one-shot and REPL modes run commands through the chosen runner.
-  if (args.sandbox) {
-    const res = await setSandboxMode(args.sandbox);
+  // SF-7 wiring: CLI flag wins; otherwise settings sandbox.mode/image applies.
+  const sandboxFromSettings = loadSandboxSettings(repoRoot);
+  const wantSandbox = args.sandbox ?? sandboxFromSettings.mode;
+  if (wantSandbox) {
+    const res = await setSandboxMode(wantSandbox);
     console.log(res.success ? pc.green(`  ✔ ${res.message}`) : pc.yellow(`  ⚠ ${res.message}`));
+    if (sandboxFromSettings.image) {
+      console.log(pc.dim(`  Sandbox image: ${sandboxFromSettings.image}${sandboxFromSettings.network === false ? " (network: none)" : ""}`));
+    }
   }
 
   if (args.printMode && !args.task) {

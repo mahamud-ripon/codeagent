@@ -44,7 +44,7 @@ export interface AgentRunResult {
   history?: unknown[];
   intent?: AgentIntent;
   stopReason?: "ok" | "stuck" | "permission" | "budget" | "error";
-  usage?: { input: number; output: number; costUsd: number };
+  usage?: { input: number; output: number; costUsd: number; cachedInput?: number };
 }
 
 export function createInitialState(userRequest: string): AgentState {

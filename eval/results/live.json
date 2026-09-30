@@ -1,0 +1,76 @@
+{
+  "total": 5,
+  "passed": 5,
+  "passRate": 1,
+  "medianTurns": 6,
+  "totalCostUsd": 0,
+  "meanSeconds": 76.239,
+  "medianTtftMs": 4740,
+  "promptVersion": "codeagent-prompt/2.0",
+  "counts": {
+    "pass": 5,
+    "fail": 0,
+    "modelTimeout": 0,
+    "modelRateLimit": 0,
+    "providerError": 0
+  },
+  "effectivePassRate": 1,
+  "results": [
+    {
+      "taskId": "bug-ts-off-by-one",
+      "ok": true,
+      "outcome": "TASK_PASS",
+      "turns": 12,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "seconds": 184.383,
+      "ttftMs": 34945
+    },
+    {
+      "taskId": "bug-ts-null",
+      "ok": true,
+      "outcome": "TASK_PASS",
+      "turns": 12,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "seconds": 106.584,
+      "ttftMs": 1993
+    },
+    {
+      "taskId": "bug-ts-async",
+      "ok": true,
+      "outcome": "TASK_PASS",
+      "turns": 6,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "seconds": 26.503,
+      "ttftMs": 2891
+    },
+    {
+      "taskId": "bug-py-indent",
+      "ok": true,
+      "outcome": "TASK_PASS",
+      "turns": 6,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "seconds": 41.386,
+      "ttftMs": 4740
+    },
+    {
+      "taskId": "bug-py-div",
+      "ok": true,
+      "outcome": "TASK_PASS",
+      "turns": 6,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "seconds": 22.339,
+      "ttftMs": 5804
+    }
+  ],
+  "at": "2026-09-30T17:20:28.864Z"
+}

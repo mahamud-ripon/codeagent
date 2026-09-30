@@ -49,3 +49,33 @@ export async function loadImageBlocks(repoRoot: string, text: string, limit = 5)
   }
   return blocks;
 }
+
+/**
+ * AG-15 wiring: turn loaded blocks into Responses-style user content
+ * (`input_text` + `input_image`) that the chat/Anthropic/Gemini
+ * translators above already forward to vision models.
+ */
+export function imageBlocksToHistoryItems(blocks: ImageBlock[], mentionText: string): unknown[] {
+  if (blocks.length === 0) return [];
+  const parts: Array<Record<string, unknown>> = [
+    { type: "input_text", text: `Attached images for: ${mentionText.slice(0, 200)}` },
+  ];
+  for (const b of blocks) {
+    parts.push({
+      type: "input_image",
+      image_url: { url: `data:${b.mediaType};base64,${b.base64}` },
+      media_type: b.mediaType,
+      data: b.base64,
+      path: b.path,
+    });
+  }
+  return [{ role: "user", content: parts }];
+}
+
+/** Anthropic image blocks ({type:"image", source:{...}}) for direct API use. */
+export function imageBlocksToAnthropic(blocks: ImageBlock[]): Array<Record<string, unknown>> {
+  return blocks.map((b) => ({
+    type: "image",
+    source: { type: "base64", media_type: b.mediaType, data: b.base64 },
+  }));
+}

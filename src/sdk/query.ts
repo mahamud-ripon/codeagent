@@ -1,5 +1,8 @@
 import { Agent } from "../agent/agent.js";
 import { PermissionManager } from "../agent/permissions.js";
+import { loadHooksSettings, loadModelSettings } from "../agent/settings.js";
+import { createProviderFromEnv } from "../llm/provider.js";
+import { resolveRoles } from "../llm/modelRouting.js";
 import type { AgentEvent } from "../llm/events.js";
 
 /**
@@ -10,6 +13,8 @@ import type { AgentEvent } from "../llm/events.js";
 export interface QueryOptions {
   repoRoot: string;
   model?: string;
+  provider?: string;
+  baseURL?: string;
   maxIterations?: number;
   signal?: AbortSignal;
   autoApprove?: boolean;
@@ -25,12 +30,30 @@ export async function* query(task: string, opts: QueryOptions): AsyncGenerator<A
     autoApprove: opts.autoApprove ?? false,
     allow: opts.allowedTools ?? [],
   });
+  // HL-4 wiring: same provider/roles/hooks path as the CLI (streaming by default).
+  const { responder, info, providerInstance, systemPrompt } = createProviderFromEnv(process.env, {
+    model: opts.model,
+    provider: opts.provider,
+    baseURL: opts.baseURL,
+  });
+  const modelSettings = loadModelSettings(opts.repoRoot);
+  const roles = resolveRoles(modelSettings, info.model);
+  const hooks = loadHooksSettings(opts.repoRoot);
   const agent = new Agent({
     repoRoot: opts.repoRoot,
-    model: opts.model ?? "gpt-5.6-luna",
+    model: info.model,
     maxIterations: opts.maxIterations ?? 30,
+    responder,
+    providerInstance,
+    systemPrompt,
     permissions,
+    provider: opts.provider,
+    baseURL: opts.baseURL,
     autoApprove: opts.autoApprove ?? false,
+    modelRoles: roles,
+    smallModel: modelSettings.smallModel,
+    capabilitiesOverride: modelSettings.capabilities,
+    hooks,
     onEvent: (e) => { queue.push(e); },
   });
   const run = agent.run(task, { signal: opts.signal, history: opts.resumeHistory }).then((r) => {

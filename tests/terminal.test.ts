@@ -35,4 +35,11 @@ describe("terminal tool", () => {
   it("rejects empty commands", async () => {
     await expect(runCommand(tmp, "   ")).rejects.toThrow(/empty/i);
   });
+
+  it("preserves quotes in inline code commands (node -e)", async () => {
+    const { runSpawn } = await import("../src/tools/process.js");
+    const out = await runSpawn(tmp, 'node -e "const x = \\"success\\"; console.log(x);"');
+    expect(out.exitCode).toBe(0);
+    expect(out.output).toContain("success");
+  });
 });

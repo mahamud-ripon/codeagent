@@ -90,11 +90,35 @@ export const tools = [
         },
         subagent_type: {
           type: "string",
-          enum: ["explore", "plan"],
-          description: "Subagent persona: 'explore' for search and code investigation (default), 'plan' for architectural planning.",
+          description: "Subagent persona: 'explore' for search and code investigation (default), 'plan' for architectural planning, 'reviewer' for code review, or a custom .codeagent/agents/<name>.md def.",
         },
       },
       required: ["task"],
+    },
+  },
+  {
+    type: "function",
+    name: "run_subagents",
+    description:
+      "Fan out 2-5 read-only subagents in parallel (bounded, order-preserving) for independent exploration tasks. Prefer this over sequential run_subagent calls when tasks are independent.",
+    parameters: {
+      type: "object",
+      properties: {
+        tasks: {
+          type: "array",
+          description: "Independent research tasks (2-5).",
+          items: {
+            type: "object",
+            properties: {
+              task: { type: "string" },
+              subagent_type: { type: "string" },
+            },
+            required: ["task"],
+          },
+        },
+        concurrency: { type: "integer", description: "Max parallel subagents (default 3, max 5)." },
+      },
+      required: ["tasks"],
     },
   },
   {

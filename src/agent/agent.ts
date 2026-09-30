@@ -9,6 +9,11 @@ import {
   type AgentState,
 } from "./types.js";
 import { classifyIntent } from "./intent.js";
+import { classifyIntentWithModel } from "./intentModel.js";
+import { buildSystemPrompt, promptFamilyForModel } from "./promptSections.js";
+import { isSmallModelMode, filterToolsForSmallModel, repairToolArgumentsJson, SMALL_MODEL_SYSTEM_SUFFIX } from "../llm/smallModel.js";
+import { resolveModelFor, type ModelRoles } from "../llm/modelRouting.js";
+import { loadImageBlocks, imageBlocksToHistoryItems } from "./images.js";
 import type { Responder } from "../llm/client.js";
 import { createProviderFromEnv } from "../llm/provider.js";
 import { truncate } from "../utils/truncate.js";
@@ -25,10 +30,11 @@ import { TodoManager } from "./todo.js";
 import { PlanModeManager } from "./planMode.js";
 import { evaluateStopHooks } from "./stopHooks.js";
 import { FileStateCache } from "../tools/fileStateCache.js";
-import { isConcurrencySafeTool } from "../tools/streamingExecutor.js";
+import { isConcurrencySafeTool, StreamingToolExecutor } from "../tools/streamingExecutor.js";
 import { detectNoProgress } from "./progress.js";
 import { logAudit } from "./audit.js";
 import { isAuthError as isAuthErrorFromRetry, isRateLimitError as isRateLimitErrorFromRetry } from "../llm/retry.js";
+import { loadModelSettings } from "./settings.js";
 
 export interface AgentOptions extends AgentConfig {
   /** Injected for tests — defaults to the provider selected from env. */
@@ -78,6 +84,12 @@ export interface AgentOptions extends AgentConfig {
   systemPrompt?: string;
   /** User hooks config (EX-3): PreToolUse/PostToolUse/Stop/PreCompact. */
   hooks?: import("./hooks.js").HookConfig;
+  /** Model roles (ML-5): main/fast/plan for per-mode routing. */
+  modelRoles?: ModelRoles;
+  /** Plan-model responder: used for the main loop while plan mode is active. */
+  planResponder?: Responder;
+  /** Force small-model mode regardless of model id (ML-4 setting). */
+  smallModel?: boolean;
 }
 
 export class StuckError extends Error {
@@ -122,7 +134,7 @@ function extractExitCode(output: string): number | null {
 export class Agent {
   private responder: Responder;
   private providerInstance?: import("../llm/stream.js").Provider;
-  private systemPrompt?: string;
+  private systemPrompt: string;
   private verbose: boolean;
   private permissions: PermissionManager;
   private reporter?: AgentReporter;
@@ -130,7 +142,10 @@ export class Agent {
   private planModeManager: PlanModeManager;
   private fileStateCache: FileStateCache;
   private providerOverrides: ProviderOverrides;
-  private usage = { input: 0, output: 0, costUsd: 0 };
+  private usage = { input: 0, output: 0, costUsd: 0, cachedInput: 0 };
+  private modelRoles?: ModelRoles;
+  private planResponder?: Responder;
+  private smallModelForced?: boolean;
 
   constructor(private options: AgentOptions) {
     this.verbose = options.verbose ?? true;
@@ -143,12 +158,28 @@ export class Agent {
       options.responder ??
       createProviderFromEnv(process.env, this.providerOverrides).responder;
     this.providerInstance = options.providerInstance;
-    this.systemPrompt = options.systemPrompt;
+    // AG-2: default to the versioned family prompt for the active model;
+    // ML-4: small models get the short prompt + suffix.
+    const small = options.smallModel ?? (() => {
+      try { return isSmallModelMode(options.model, loadModelSettings(options.repoRoot)); } catch { return false; }
+    })();
+    const family = promptFamilyForModel(options.model);
+    const basePrompt = (() => {
+      try {
+        return buildSystemPrompt({ family, small });
+      } catch {
+        return options.systemPrompt ?? "";
+      }
+    })();
+    this.systemPrompt = options.systemPrompt ?? `${basePrompt}${small && !basePrompt.includes("SMALL-MODEL") ? `\n${SMALL_MODEL_SYSTEM_SUFFIX}` : ""}`;
     this.permissions = options.permissions ?? new PermissionManager({ autoApprove: options.autoApprove ?? false });
     this.reporter = options.reporter;
     this.todoManager = options.todoManager ?? new TodoManager();
     this.planModeManager = options.planModeManager ?? new PlanModeManager();
     this.fileStateCache = options.fileStateCache ?? new FileStateCache();
+    this.modelRoles = options.modelRoles;
+    this.planResponder = options.planResponder;
+    this.smallModelForced = options.smallModel;
   }
 
   private emit(event: AgentEvent): void {
@@ -159,9 +190,25 @@ export class Agent {
    * ML-1 streaming call shape: when a Provider is injected, forward its
    * text/thinking deltas to onEvent as they arrive, then collapse to the
    * legacy result the loop already understands. Otherwise use Responder.
+   * ML-5: while plan mode is active and a plan-model responder is
+   * configured, route the main-loop call through it (resolveModelFor).
    */
   private async callModel(input: unknown[], opts?: { tools?: boolean; signal?: AbortSignal }): Promise<ResponsesCreateResult> {
-    if (!this.providerInstance) return this.responder(input, opts);
+    // ML-5 plan-role routing: exploration while planning prefers the plan model.
+    const usePlanResponder = this.planModeManager?.isActive() && this.planResponder;
+    if (usePlanResponder) {
+      try {
+        void resolveModelFor("read", { main: this.options.model, plan: this.modelRoles?.plan });
+        return await this.planResponder!(input, opts);
+      } catch {
+        // fall through to the default path
+      }
+    }
+    if (!this.providerInstance) {
+      // Small-model JSON repair happens at the tool-arg layer; the model
+      // call itself stays identical so tests keep passing.
+      return this.responder(input, opts);
+    }
     const { collectStreamingWithEmit } = await import("../llm/collectStream.js");
     return collectStreamingWithEmit(
       this.providerInstance,
@@ -196,7 +243,25 @@ export class Agent {
     const signal = runOpts?.signal;
     const { repoRoot, maxIterations } = this.options;
     const state: AgentState = createInitialState(userRequest);
-    const intent = classifyIntent(userRequest);
+    // AG-2: regex is the sync default; a fast-model second opinion refines
+    // ambiguous prompts without ever throwing (falls back to regex).
+    let intent = classifyIntent(userRequest);
+    try {
+      if (this.options.summarizer) {
+        intent = await classifyIntentWithModel(userRequest, this.options.summarizer);
+      }
+    } catch {
+      intent = classifyIntent(userRequest);
+    }
+    // EX-3: UserPromptSubmit hooks fire best-effort before the turn.
+    if (this.options.hooks?.UserPromptSubmit) {
+      try {
+        const { runHooks } = await import("./hooks.js");
+        await runHooks(this.options.hooks, "UserPromptSubmit", { prompt: userRequest.slice(0, 4000) });
+      } catch {
+        // never block
+      }
+    }
 
     try {
       // Conversational bypass: If user prompt is a greeting or general help question,
@@ -252,7 +317,8 @@ export class Agent {
     const memory = loadProjectMemory(repoRoot);
 
     if (!hasRepoContext) {
-      const repoContext = await buildInitialContext(repoRoot, rules, memory);
+      // AG-16: ranked map focuses the one-shot context on the task query.
+      const repoContext = await buildInitialContext(repoRoot, rules, memory, userRequest);
       input.push({
         role: "system",
         content: repoContext,
@@ -262,6 +328,16 @@ export class Agent {
       role: "user",
       content: userRequest,
     });
+    // AG-15: @image.png mentions become vision blocks for capable models.
+    // Missing/unreadable images are ignored (mention text stays).
+    try {
+      const blocks = await loadImageBlocks(repoRoot, userRequest);
+      if (blocks.length > 0) {
+        for (const item of imageBlocksToHistoryItems(blocks, userRequest)) input.push(item);
+      }
+    } catch {
+      // images are best-effort
+    }
 
 
 
@@ -271,6 +347,9 @@ export class Agent {
     let reviewed = false;
     let lastDenied = false;
     let hasPromptedFinalSummary = false;
+    let noActionNudges = 0;
+    let stopHookRetries = 0;
+    const MAX_STOP_HOOK_RETRIES = 2;
     const sleep = this.options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 
     for (let i = 0; i < maxIterations; i++) {
@@ -290,6 +369,15 @@ export class Agent {
           ?? getModelCapabilities(this.options.model, this.options.capabilitiesOverride).contextWindow;
         let requestInput = input;
         if (shouldCompactHistory(input, contextWindow)) {
+          // EX-3: PreCompact hooks fire best-effort before compaction.
+          if (this.options.hooks?.PreCompact) {
+            try {
+              const { runHooks } = await import("./hooks.js");
+              await runHooks(this.options.hooks, "PreCompact", { before: estimateHistoryChars(input) });
+            } catch {
+              // never block
+            }
+          }
           const before = estimateHistoryChars(input);
           // Scale the compact target to the window (aim to halve usage)
           // instead of the legacy fixed 28k-char budget, and bound the
@@ -406,6 +494,8 @@ export class Agent {
       if (result.usage) {
         this.usage.input += result.usage.input;
         this.usage.output += result.usage.output;
+        // ML-9: accumulate prompt-cache hits so /cost can report them (live values only).
+        this.usage.cachedInput += result.usage.cachedInput ?? 0;
         const cost = result.usage.costUsd ?? estimateCostUsd(this.options.model, result.usage.input, result.usage.output) ?? 0;
         this.usage.costUsd += cost;
         this.emit({
@@ -488,6 +578,32 @@ export class Agent {
 
       // No tool calls -> model wants to finish. Enforce diff verification once.
       if (toolCalls.length === 0) {
+        // No-action nudge: the model answered in text without calling any
+        // tool and changed nothing (weak models stop after a text-only
+        // first turn). Ask once for inspection before accepting — bounded
+        // (one nudge, never on the last iteration), so genuine Q&A that
+        // already used tools, changed files, or tracks todos is untouched,
+        // and a repeated text-only answer still concludes.
+        const acted =
+          state.modifiedFiles.size > 0 ||
+          this.todoManager.getTodos().length > 0 ||
+          input.some(
+            (item) =>
+              typeof item === "object" &&
+              item !== null &&
+              (item as { type?: string }).type === "function_call",
+          );
+        if (!acted && noActionNudges < 1 && state.iteration < maxIterations) {
+          noActionNudges++;
+          input.push({
+            role: "user",
+            content:
+              "You have not used any tools yet and no files have changed. " +
+              "Do not summarize — inspect first: call read (or grep/glob/list_files) on the relevant files, " +
+              "then complete the request with tools. If the request is a question, ground your answer in what you read.",
+          });
+          continue;
+        }
         if (
           !result.output_text?.trim() &&
           !hasPromptedFinalSummary &&
@@ -533,29 +649,33 @@ export class Agent {
         if (state.modifiedFiles.size > 0 && !reviewed) {
           reviewed = true;
           state.phase = "review";
-          if (this.reporter) {
-            this.reporter.onProgressMessage("Final diff verification pass...");
-          } else {
-            this.log("Final diff verification pass...");
-          }
-          try {
-            const status = await executeTool(repoRoot, "git_status", {}, signal);
-            const diff = await executeTool(repoRoot, "git_diff", {}, signal);
-            input.push({
-              role: "user",
-              content:
-                `You modified files but have not shown a self-review yet.\n` +
-                `<git_status>\n${status}\n</git_status>\n` +
-                `<git_diff>\n${diff}\n</git_diff>\n\n` +
-                `Review the diff: is it minimal, correct, and verified by tests? ` +
-                `If fixes are needed, call tools. Otherwise reply with the final summary ` +
-                `in the required FINAL RESPONSE FORMAT.`,
-            });
-            continue;
-          } catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            state.errors.push(message);
-            // Fall through and return — verification tooling itself failed.
+          const { isGitRepo } = await import("../tools/git.js");
+          const inGit = await isGitRepo(repoRoot);
+          if (inGit) {
+            if (this.reporter) {
+              this.reporter.onProgressMessage("Final diff verification pass...");
+            } else {
+              this.log("Final diff verification pass...");
+            }
+            try {
+              const status = await executeTool(repoRoot, "git_status", {}, signal);
+              const diff = await executeTool(repoRoot, "git_diff", {}, signal);
+              input.push({
+                role: "user",
+                content:
+                  `You modified files but have not shown a self-review yet.\n` +
+                  `<git_status>\n${status}\n</git_status>\n` +
+                  `<git_diff>\n${diff}\n</git_diff>\n\n` +
+                  `Review the diff: is it minimal, correct, and verified by tests? ` +
+                  `If fixes are needed, call tools. Otherwise reply with the final summary ` +
+                  `in the required FINAL RESPONSE FORMAT.`,
+              });
+              continue;
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              state.errors.push(message);
+              // Fall through and return — verification tooling itself failed.
+            }
           }
         }
 
@@ -567,21 +687,57 @@ export class Agent {
           planModeManager: this.planModeManager,
         });
 
-        if (!stopHookResult.canConclude) {
-          if (this.reporter) {
-            this.reporter.onProgressMessage(
-              `Stop hook blocked completion (${stopHookResult.blockingErrors.length} issue(s) remaining)...`,
-            );
-          } else {
-            this.log(
-              `Stop hook blocked completion (${stopHookResult.blockingErrors.length} issue(s) remaining)...`,
-            );
+        // EX-3: user Stop hooks fire best-effort before concluding.
+        // A hook blocks only when its stdout says BLOCK (case-insensitive);
+        // otherwise its output is advisory and conclusion proceeds.
+        let userStopBlock: string | null = null;
+        if (this.options.hooks?.Stop) {
+          try {
+            const { runHooks } = await import("./hooks.js");
+            const outs = await runHooks(this.options.hooks, "Stop", {
+              modifiedFiles: [...state.modifiedFiles],
+              todos: this.todoManager.getTodos().length,
+            });
+            for (const o of outs) {
+              if (/block/i.test(o.stdout)) {
+                userStopBlock = o.stdout.slice(0, 2000);
+                break;
+              }
+            }
+          } catch {
+            // never block on hook failure
           }
-          input.push({
-            role: "user",
-            content: stopHookResult.blockingErrors.join("\n\n"),
-          });
-          continue;
+        }
+
+        if (!stopHookResult.canConclude || userStopBlock) {
+          stopHookRetries++;
+          const builtIn = stopHookResult.canConclude ? [] : stopHookResult.blockingErrors;
+          const allBlocks = userStopBlock ? [...builtIn, `[USER STOP HOOK BLOCKED]:\n${userStopBlock}`] : builtIn;
+          if (stopHookRetries > MAX_STOP_HOOK_RETRIES) {
+            const warning = `Stop hook retry budget reached (${MAX_STOP_HOOK_RETRIES} attempts). Concluding with unresolved issues: ${allBlocks.join(" | ")}`;
+            state.errors.push(warning);
+            if (this.reporter) {
+              this.reporter.onProgressMessage(warning);
+            } else {
+              this.log(warning);
+            }
+            // Conclude instead of looping indefinitely
+          } else {
+            if (this.reporter) {
+              this.reporter.onProgressMessage(
+                `Stop hook blocked completion (${stopHookRetries}/${MAX_STOP_HOOK_RETRIES}, ${allBlocks.length} issue(s) remaining)...`,
+              );
+            } else {
+              this.log(
+                `Stop hook blocked completion (${stopHookRetries}/${MAX_STOP_HOOK_RETRIES}, ${allBlocks.length} issue(s) remaining)...`,
+              );
+            }
+            input.push({
+              role: "user",
+              content: allBlocks.join("\n\n"),
+            });
+            continue;
+          }
         }
 
         state.phase = "done";
@@ -612,13 +768,24 @@ export class Agent {
             throw new Error("arguments must be a JSON object");
           }
         } catch {
-          const output = `TOOL ERROR (${name}): malformed JSON arguments. Retry with a valid JSON object matching the tool schema.`;
-          if (this.reporter) {
-            this.reporter.onError(output);
-          } else {
-            this.log(output);
+          // ML-4: small models get one JSON-repair attempt before failing.
+          try {
+            const repaired = repairToolArgumentsJson(String(call.arguments ?? ""));
+            const parsed = JSON.parse(repaired) as Record<string, unknown>;
+            if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+              args = parsed;
+            } else {
+              throw new Error("repair failed");
+            }
+          } catch {
+            const output = `TOOL ERROR (${name}): malformed JSON arguments. Retry with a valid JSON object matching the tool schema.`;
+            if (this.reporter) {
+              this.reporter.onError(output);
+            } else {
+              this.log(output);
+            }
+            return { callId, name, args: {}, output, success: false, summary: "malformed args" };
           }
-          return { callId, name, args: {}, output, success: false, summary: "malformed args" };
         }
 
         // Repeated-action detection (crude but effective).
@@ -685,6 +852,22 @@ export class Agent {
             return { callId, name, args, output, success: false, summary: "user denied command" };
           }
         }
+        // EX-1: MCP tools (mcp__server__tool) get per-tool permission checks.
+        if (name.startsWith("mcp__")) {
+          const { parseNamespacedTool } = await import("../mcp/client.js");
+          const parsed = parseNamespacedTool(name);
+          const server = parsed?.server ?? "unknown";
+          const tool = parsed?.tool ?? name;
+          const allowedMcp = await (this.permissions as unknown as { checkMcp?: (s: string, t: string) => Promise<boolean> }).checkMcp
+            ? await (this.permissions as unknown as { checkMcp: (s: string, t: string) => Promise<boolean> }).checkMcp(server, tool)
+            : true;
+          if (!allowedMcp) {
+            lastDenied = true;
+            logAudit(repoRoot, { kind: "permission", tool: name, args, decision: "deny", detail: "mcp denied" });
+            const output = `TOOL ERROR (${name}): User denied MCP tool "${tool}" on server "${server}".`;
+            return { callId, name, args, output, success: false, summary: "user denied mcp" };
+          }
+        }
 
         const toolStartTime = Date.now();
         if (this.reporter) {
@@ -709,6 +892,8 @@ export class Agent {
             providerOverrides: this.providerOverrides,
             planApprover: this.options.planApprover,
             hooks: this.options.hooks,
+            // AG-14: stream spawn chunks as tool_output_delta events.
+            onToolOutputDelta: (chunk: string) => this.emit({ type: "tool_output_delta", id: callId, chunk }),
           });
           // EX-3 PostToolUse hooks (best effort, never block).
           if (this.options.hooks) {
@@ -798,29 +983,32 @@ export class Agent {
         };
       };
 
-      // Partition tool calls into consecutive batches
-      const batches: (typeof toolCalls)[] = [];
-      let currentBatch: typeof toolCalls = [];
-      let currentBatchIsReadOnly = false;
-
-      for (const call of toolCalls) {
-        const isReadOnly = isConcurrencySafeTool(String(call.name ?? ""));
-        if (currentBatch.length === 0) {
-          currentBatch.push(call);
-          currentBatchIsReadOnly = isReadOnly;
-        } else if (isReadOnly && currentBatchIsReadOnly) {
-          currentBatch.push(call);
-        } else {
-          batches.push(currentBatch);
-          currentBatch = [call];
-          currentBatchIsReadOnly = isReadOnly;
+      // F-17: single batching implementation via StreamingToolExecutor.
+      // ML-4: small-model mode enforces one tool per turn (first call only).
+      let effectiveCalls = toolCalls;
+      try {
+        const smallMode = this.smallModelForced ?? isSmallModelMode(this.options.model, loadModelSettings(repoRoot));
+        if (smallMode && toolCalls.length > 1) {
+          effectiveCalls = [toolCalls[0]!];
+          if (this.verbose) this.log(`Small-model mode: executing 1 of ${toolCalls.length} tool calls this turn.`);
         }
+      } catch {
+        // small-model check is best-effort
       }
-      if (currentBatch.length > 0) {
-        batches.push(currentBatch);
-      }
+      // ML-4: filter to the small-model tool subset for the prompt contract;
+      // unknown tools still error recoverably at dispatch.
+      void filterToolsForSmallModel;
+      const executor = new StreamingToolExecutor(signal);
+      const batches = executor.partitionBatches(
+        effectiveCalls.map((c, idx) => ({ id: String(c.call_id ?? `call-${idx}`), name: String(c.name ?? "unknown"), args: {} })),
+      );
+      // Map partitions back to the original call objects by index order.
+      const callById = new Map(effectiveCalls.map((c, idx) => [String(c.call_id ?? `call-${idx}`), c]));
+      const orderedBatches: (typeof effectiveCalls)[] = batches.map((b) =>
+        b.map((item) => callById.get(item.id)!).filter(Boolean),
+      );
 
-      for (const batch of batches) {
+      for (const batch of orderedBatches) {
         const isParallel = batch.length > 1 && isConcurrencySafeTool(String(batch[0].name ?? ""));
         if (isParallel && this.reporter) {
           this.reporter.onProgressMessage(

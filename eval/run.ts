@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { PROMPT_VERSION } from "../src/agent/promptSections.js";
 
 interface Task {
   id: string;
@@ -35,6 +36,9 @@ const report = {
   tasks: tasks.length,
   ok: errors.length === 0,
   errors,
+  // F-8: pin the prompt version so a prompt change without a fresh live
+  // baseline is visible (promptVersion mismatch vs eval/results/live.json).
+  promptVersion: PROMPT_VERSION,
   note: "Live model scores need EVAL_LIVE=1 and an API key. This smoke run checks the task set only.",
 };
 fs.writeFileSync(path.join(outDir, "smoke.json"), JSON.stringify(report, null, 2));
@@ -48,6 +52,7 @@ fs.writeFileSync(
     "Set `EVAL_LIVE=1` when a provider is available to score the same tasks against a model.",
     "",
     `Smoke: ${tasks.length} tasks, ok=${report.ok}.`,
+    `Prompt version: ${PROMPT_VERSION} (compare with eval/results/live.json after a live run; a mismatch means the baseline is stale).`,
     "",
   ].join("\n"),
 );

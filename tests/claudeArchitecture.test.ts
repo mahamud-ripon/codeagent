@@ -156,9 +156,13 @@ describe("Claude Code Architecture & Logic Engineering", () => {
       });
 
       const result = await agent.run("Write compute function");
-      expect(turn).toBe(2);
+      // Turn 1 hits the length cap (resume prompt), turn 2 finishes text-only
+      // with no tool calls, so the no-action nudge asks once for inspection
+      // before the run concludes on turn 3.
+      expect(turn).toBe(3);
       expect(result.finalMessage).toContain("return 42;");
       expect(promptsReceived.some((p) => p.includes("Output token limit hit. Resume directly"))).toBe(true);
+      expect(promptsReceived.some((p) => p.includes("not used any tools"))).toBe(true);
     });
   });
 

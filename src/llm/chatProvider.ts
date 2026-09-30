@@ -1,7 +1,9 @@
 import type OpenAI from "openai";
 import { toChatTools } from "./tools.js";
 import type { ResponsesCreateResult, Responder, ResponderOptions } from "./client.js";
-import { collectProviderEvents, streamChatChunks, type ChatStreamChunk } from "./stream.js";
+import { collectProviderEvents, streamChatChunks, type ChatStreamChunk, type Provider } from "./stream.js";
+import type { ProviderEvent, StreamRequest } from "./events.js";
+import { getModelCapabilities } from "./capabilities.js";
 import { withProviderRetry } from "./retry.js";
 
 /**
@@ -75,6 +77,8 @@ function extractMessageText(item: Record<string, unknown>): string {
  * Handles: {role,user} items, function_call / function_call_output
  * pairs, message items carrying assistant text, and skips anything
  * the chat API cannot represent (reasoning items, etc.).
+ * AG-15: mixed text/image user content is preserved as OpenAI
+ * [{type:"text"}|{type:"image_url"}] parts.
  */
 export function responsesHistoryToChatMessages(input: unknown[]): ChatMessage[] {
   const messages: ChatMessage[] = [];
@@ -130,6 +134,27 @@ export function responsesHistoryToChatMessages(input: unknown[]): ChatMessage[] 
 
     if (raw.role === "user" || raw.role === "system") {
       flushAssistant();
+      const content = (raw as { content?: unknown }).content;
+      // AG-15: preserve mixed text/image arrays for vision models.
+      if (Array.isArray(content)) {
+        const parts: Array<{ type: string; text?: string; image_url?: { url: string } }> = [];
+        for (const p of content as Array<Record<string, unknown>>) {
+          if (!isRecord(p)) continue;
+          if (typeof p.text === "string" && (p.type === "input_text" || p.type === "text")) {
+            parts.push({ type: "text", text: p.text as string });
+          } else if (typeof p.text === "string" && !p.type) {
+            parts.push({ type: "text", text: p.text as string });
+          } else if (p.type === "input_image" || p.type === "image_url") {
+            const inner = p.image_url as { url?: string } | undefined;
+            const url = typeof inner?.url === "string" ? inner.url
+              : typeof p.image_url === "string" ? (p.image_url as string)
+              : typeof p.data === "string" ? `data:${String(p.media_type ?? "image/png")};base64,${p.data as string}` : null;
+            if (url) parts.push({ type: "image_url", image_url: { url } });
+          }
+        }
+        messages.push({ role: raw.role, content: parts as unknown as string } as ChatMessage);
+        continue;
+      }
       messages.push({
         role: raw.role,
         content: typeof raw.content === "string" ? raw.content : String(raw.content ?? ""),
@@ -214,15 +239,145 @@ export function extractThinking(msg: {
   };
 }
 
+/**
+ * Systems living in history (repo context, memory) must be folded into the
+ * single provider system string: some OpenAI-compat endpoints return an
+ * empty stream when more than one system message is present, and native
+ * Anthropic/Gemini requests carry system outside `messages` (ML-1/ML-9).
+ */
+export function extractHistorySystems(messages: Array<{ role?: string; content?: unknown }>): string[] {
+  const out: string[] = [];
+  for (const m of messages) {
+    if (m?.role === "system" && typeof m.content === "string" && m.content) out.push(m.content);
+  }
+  return out;
+}
+/**
+ * Minimal SSE parser for Chat Completions streams (ML-1).
+ * Kept local (instead of reusing anthropic.ts's parseSseStream) so this
+ * module stays importable from anthropic.ts/gemini.ts without a cycle.
+ * Skips `[DONE]` sentinels and truncated-JSON frames, like the other adapters.
+ */
+export async function* parseChatSse(
+  stream: ReadableStream<Uint8Array> | AsyncIterable<string | Uint8Array>,
+): AsyncGenerator<ChatStreamChunk> {
+  const textChunks: string[] = [];
+  // Same live-SSE fix as parseSseStream: Node 22 web streams async-iterate
+  // Uint8Array chunks, which String() would corrupt into "104,101,...".
+  const decoder = new TextDecoder();
+  if (Symbol.asyncIterator in Object(stream)) {
+    for await (const part of stream as AsyncIterable<string | Uint8Array>) {
+      textChunks.push(typeof part === "string" ? part : decoder.decode(part, { stream: true }));
+    }
+    textChunks.push(decoder.decode());
+  } else {
+    const reader = (stream as ReadableStream<Uint8Array>).getReader();
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      textChunks.push(decoder.decode(value, { stream: true }));
+    }
+    textChunks.push(decoder.decode());
+  }
+  const raw = textChunks.join("");
+  for (const block of raw.split(/\n\n+/)) {
+    const dataLines: string[] = [];
+    let isErrorEvent = false;
+    for (const line of block.split("\n")) {
+      if (line.startsWith("event:") && line.slice(6).trim() === "error") isErrorEvent = true;
+      if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+    }
+    if (dataLines.length === 0) continue;
+    const dataRaw = dataLines.join("\n");
+    if (dataRaw === "[DONE]") continue;
+    try {
+      const parsed = JSON.parse(dataRaw) as ChatStreamChunk & { error?: { message?: string } };
+      if (isErrorEvent || parsed.error) {
+        const msg = parsed.error?.message ?? dataRaw;
+        throw new Error(`Chat upstream error: ${msg}`);
+      }
+      yield parsed;
+    } catch (e) {
+      if (e instanceof Error && e.message.startsWith("Chat upstream error:")) throw e;
+      // Truncated JSON frame — same fault-injection tolerance as other adapters.
+    }
+  }
+}
+
+export interface ChatStreamOptions {
+  model: string;
+  apiKey: string;
+  baseURL?: string;
+  systemPrompt?: string;
+  fetchImpl?: typeof fetch;
+}
+
+/**
+ * Native Chat Completions streaming provider (ML-1): POST
+ * `{baseURL}/chat/completions` with `stream: true`.
+ * Covers Ollama, Groq, OpenRouter, Gemini-compat and any other
+ * OpenAI-compatible endpoint with true incremental deltas, so the
+ * chat/compat backend is no longer responder-only.
+ */
+export function createChatStreamProvider(opts: ChatStreamOptions): Provider {
+  const base = (opts.baseURL ?? "https://api.openai.com/v1").replace(/\/+$/, "");
+  const fetchImpl = opts.fetchImpl ?? fetch;
+  return {
+    capabilities: getModelCapabilities(opts.model),
+    async *stream(req: StreamRequest): AsyncGenerator<ProviderEvent> {
+      const history = responsesHistoryToChatMessages(req.messages);
+      // One system message total: history systems (repo context, memory)
+      // fold into the head — extra system messages make some compat
+      // endpoints return an empty stream (observed live, Qwen via proxy).
+      const extraSystem = extractHistorySystems(history as Array<{ role?: string; content?: unknown }>);
+      const rest = history.filter(
+        (m) => (m as { role?: string }).role !== "system" || typeof (m as { content?: unknown }).content !== "string",
+      );
+      const head = [opts.systemPrompt, req.system, ...extraSystem].filter(Boolean).join("\n\n");
+      const messages: ChatMessage[] = [
+        ...(head ? [{ role: "system", content: head } as ChatMessage] : []),
+        ...rest,
+      ];
+      const res = await withProviderRetry(() =>
+        fetchImpl(`${base}/chat/completions`, {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${opts.apiKey}` },
+          body: JSON.stringify({
+            model: opts.model,
+            messages,
+            tools: req.tools ? (toChatTools() as unknown as ChatTool[]) : undefined,
+            stream: true,
+          }),
+          signal: req.signal,
+        }).then(async (r) => {
+          if (!r.ok) {
+            const text = await r.text().catch(() => "");
+            const err = new Error(`Chat ${r.status}: ${text.slice(0, 300)}`) as Error & { status?: number };
+            (err as { status?: number }).status = r.status;
+            throw err;
+          }
+          return r;
+        }),
+      );
+      if (!res.body) throw new Error("Chat stream had no body.");
+      yield* streamChatChunks(parseChatSse(res.body as ReadableStream<Uint8Array>));
+      if (req.signal?.aborted) throw new Error("Provider request cancelled (AbortSignal).");
+    },
+  };
+}
+
 export function createChatResponder(
   client: MinimalChatClient,
   args: { model: string; systemPrompt: string },
 ): Responder {
   return async (input: unknown[], options?: ResponderOptions) => {
-    const messages: ChatMessage[] = [
-      { role: "system", content: args.systemPrompt },
-      ...responsesHistoryToChatMessages(input),
-    ];
+    const history = responsesHistoryToChatMessages(input);
+    const extraSystem = extractHistorySystems(history as Array<{ role?: string; content?: unknown }>);
+    const rest = history.filter(
+      (m) => (m as { role?: string }).role !== "system" || typeof (m as { content?: unknown }).content !== "string",
+    );
+    const head = [args.systemPrompt, ...extraSystem].filter(Boolean).join("\n\n");
+    const messages: ChatMessage[] = [...(head ? [{ role: "system", content: head } as ChatMessage] : []), ...rest];
 
     const useTools = options?.tools ?? true;
     const created = await withProviderRetry(() =>

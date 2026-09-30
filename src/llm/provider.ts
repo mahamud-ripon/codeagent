@@ -1,14 +1,60 @@
 import OpenAI from "openai";
 import { createOpenAIClient, createResponder, type Responder } from "./client.js";
 import { createChatResponder, type MinimalChatClient } from "./chatProvider.js";
-import { providerToResponder } from "./stream.js";
+import { providerToResponder, type Provider } from "./stream.js";
 import { createStreamingProvider } from "./streamingProvider.js";
 import { SYSTEM_PROMPT } from "../agent/prompt.js";
+import { buildSystemPrompt, promptFamilyForModel } from "../agent/promptSections.js";
+import { isSmallModel } from "./smallModel.js";
+import { resolveSecretSync } from "./keychain.js";
 
 export type ProviderKind = "openai-responses" | "openai-chat" | "anthropic" | "gemini";
 
 /** Single source of truth for the default model id (overridable via $MODEL). */
 export const DEFAULT_MODEL = "gpt-5.6-luna";
+
+/**
+ * Versioned modular prompt (AG-2) for a model id.
+ * Family routing: claude → anthropic notes, gemini → gemini notes,
+ * small/cheap models → small suffix. Falls back to the legacy
+ * SYSTEM_PROMPT shape for the default family so existing tests keep passing.
+ */
+export function systemPromptForModel(model?: string, opts?: { smallModel?: boolean }): string {
+  const family = promptFamilyForModel(model);
+  const small = opts?.smallModel ?? isSmallModel(model);
+  try {
+    return buildSystemPrompt({ family, small });
+  } catch {
+    return SYSTEM_PROMPT;
+  }
+}
+
+function resolveKeySync(env: NodeJS.ProcessEnv, key: string): string | undefined {
+  if (env[key]) return env[key];
+  // ML-7 file fallback applies at runtime only (process.env). Explicit env
+  // objects in tests stay pure so MissingApiKeyError is deterministic.
+  if (env !== process.env) return undefined;
+  try {
+    return resolveSecretSync(key);
+  } catch {
+    return undefined;
+  }
+}
+
+function hasConfiguredKey(env: NodeJS.ProcessEnv, key: string, altKey?: string): boolean {
+  if (env[key]) return true;
+  if (altKey && env[altKey]) return true;
+  // Runtime-only file fallback (see resolveKeySync): tests pass {} and
+  // must observe needsKey:true deterministically.
+  if (env !== process.env) return false;
+  try {
+    if (resolveSecretSync(key)) return true;
+    if (altKey && resolveSecretSync(altKey)) return true;
+  } catch {
+    // file read is best-effort
+  }
+  return false;
+}
 
 export interface ProviderInfo {
   kind: ProviderKind;
@@ -29,7 +75,8 @@ export class MissingApiKeyError extends Error {
 }
 
 function resolveApiKey(env: NodeJS.ProcessEnv, baseURL?: string): string {
-  if (env.OPENAI_API_KEY) return env.OPENAI_API_KEY;
+  const fromEnv = resolveKeySync(env, "OPENAI_API_KEY");
+  if (fromEnv) return fromEnv;
   if (baseURL) return "ollama"; // local servers typically ignore the key
   throw new MissingApiKeyError();
 }
@@ -56,10 +103,10 @@ export function describeProviderFromEnv(
   const explicit = (overrides?.provider ?? env.LLM_PROVIDER ?? "").trim().toLowerCase();
 
   if (explicit === "anthropic") {
-    return { kind: "anthropic", model, needsKey: !env.ANTHROPIC_API_KEY };
+    return { kind: "anthropic", model, needsKey: !hasConfiguredKey(env, "ANTHROPIC_API_KEY") };
   }
   if (explicit === "gemini") {
-    return { kind: "gemini", model, needsKey: !env.GEMINI_API_KEY && !env.GOOGLE_API_KEY };
+    return { kind: "gemini", model, needsKey: !hasConfiguredKey(env, "GEMINI_API_KEY", "GOOGLE_API_KEY") };
   }
 
   const useChat =
@@ -68,26 +115,50 @@ export function describeProviderFromEnv(
     explicit === "compatible" ||
     (explicit === "" && !!baseURL);
 
-  if (!useChat) return { kind: "openai-responses", model, needsKey: !env.OPENAI_API_KEY };
-  return { kind: "openai-chat", model, baseURL, needsKey: !env.OPENAI_API_KEY && !baseURL };
+  if (!useChat) return { kind: "openai-responses", model, needsKey: !hasConfiguredKey(env, "OPENAI_API_KEY") };
+  return { kind: "openai-chat", model, baseURL, needsKey: !hasConfiguredKey(env, "OPENAI_API_KEY") && !baseURL };
 }
 /**
  * Build the live responder. Throws MissingApiKeyError when a key is
  * required but absent — callers should catch it and show setup help,
  * never a stack trace. Free routes: Ollama (local, no key), Groq /
  * Gemini / OpenRouter free tier (key + baseURL + MODEL).
+ *
+ * ML-1 wiring: also returns a true streaming `providerInstance` for every
+ * backend (Responses / Anthropic / Gemini / OpenAI-compatible chat SSE)
+ * so the agent loop and REPL can stream deltas by default. The one-shot
+ * Responder stays as fallback for tests/offline.
+ * ML-7 wiring: keys resolve via env → keychain/0600 file (resolveSecretSync).
+ * AG-2 wiring: system prompt is the versioned family prompt for the model.
  */
 export function createProviderFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   overrides?: ProviderOverrides,
-): { responder: Responder; info: ProviderInfo } {
+): { responder: Responder; info: ProviderInfo; providerInstance?: Provider; systemPrompt: string } {
   const described = describeProviderFromEnv(env, overrides);
+  const systemPrompt = systemPromptForModel(described.model);
 
   if (described.kind === "openai-responses") {
-    const client = createOpenAIClient(resolveApiKey(env));
+    const apiKey = resolveApiKey(env, undefined);
+    const client = createOpenAIClient(apiKey);
+    // Default path streams via Responses-SSE when a key is present;
+    // the one-shot Responder stays as fallback for tests/offline.
+    let providerInstance: Provider | undefined;
+    try {
+      providerInstance = createStreamingProvider({
+        kind: "openai-responses",
+        model: described.model,
+        apiKey,
+        systemPrompt,
+      });
+    } catch {
+      providerInstance = undefined;
+    }
     return {
-      responder: createResponder(client, { model: described.model, instructions: SYSTEM_PROMPT }),
+      responder: createResponder(client, { model: described.model, instructions: systemPrompt }),
       info: { kind: described.kind, model: described.model },
+      providerInstance,
+      systemPrompt,
     };
   }
 
@@ -97,30 +168,47 @@ export function createProviderFromEnv(
     // Until a key is configured, return a fail-closed responder that throws
     // MissingApiKeyError instead of hitting the network.
     const key = described.kind === "anthropic"
-      ? env.ANTHROPIC_API_KEY
-      : (env.GEMINI_API_KEY ?? env.GOOGLE_API_KEY);
+      ? resolveKeySync(env, "ANTHROPIC_API_KEY")
+      : (resolveKeySync(env, "GEMINI_API_KEY") ?? resolveKeySync(env, "GOOGLE_API_KEY"));
     if (!key) {
       const missing = (): Promise<never> => { throw new MissingApiKeyError(); };
-      return { responder: missing, info: { kind: described.kind, model: described.model } };
+      return { responder: missing, info: { kind: described.kind, model: described.model }, systemPrompt };
     }
     const provider = createStreamingProvider({
       kind: described.kind,
       model: described.model,
       apiKey: key,
-      systemPrompt: SYSTEM_PROMPT,
+      systemPrompt,
     });
-    return { responder: providerToResponder(provider, SYSTEM_PROMPT), info: { kind: described.kind, model: described.model } };
+    return { responder: providerToResponder(provider, systemPrompt), info: { kind: described.kind, model: described.model }, providerInstance: provider, systemPrompt };
   }
 
+  const apiKey = resolveApiKey(env, described.baseURL);
   const client = new OpenAI({
-    apiKey: resolveApiKey(env, described.baseURL),
+    apiKey,
     ...(described.baseURL ? { baseURL: described.baseURL } : {}),
   });
+  // ML-1: chat/compat streams natively via Chat Completions SSE (Ollama,
+  // Groq, OpenRouter…). A local baseURL needs no key ("ollama" placeholder).
+  let providerInstance: Provider | undefined;
+  try {
+    providerInstance = createStreamingProvider({
+      kind: "openai-chat",
+      model: described.model,
+      apiKey,
+      baseURL: described.baseURL,
+      systemPrompt,
+    });
+  } catch {
+    providerInstance = undefined;
+  }
   return {
     responder: createChatResponder(client as unknown as MinimalChatClient, {
       model: described.model,
-      systemPrompt: SYSTEM_PROMPT,
+      systemPrompt,
     }),
     info: { kind: described.kind, model: described.model, baseURL: described.baseURL },
+    providerInstance,
+    systemPrompt,
   };
 }

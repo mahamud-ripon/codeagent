@@ -13,6 +13,8 @@ export interface ChatStreamChunk {
     delta?: {
       content?: string | null;
       reasoning_content?: string | null;
+      /** Some proxies (AMD Radeon API) stream thinking here instead. */
+      reasoning?: string | null;
       tool_calls?: Array<{
         index?: number;
         id?: string;
@@ -41,6 +43,9 @@ export function chatChunkToEvents(chunk: ChatStreamChunk, tools: Map<number, Too
   }
   if (typeof delta?.reasoning_content === "string" && delta.reasoning_content) {
     events.push({ type: "thinking_delta", text: delta.reasoning_content });
+  }
+  if (typeof delta?.reasoning === "string" && delta.reasoning) {
+    events.push({ type: "thinking_delta", text: delta.reasoning });
   }
   for (const call of delta?.tool_calls ?? []) {
     const index = call.index ?? 0;
@@ -161,6 +166,38 @@ export function scriptedProvider(events: ProviderEvent[], capabilities: ModelCap
     capabilities,
     async *stream() {
       for (const event of events) yield event;
+    },
+  };
+}
+
+/**
+ * F-1: wrap a Provider to report time-to-first-token — ms from stream start
+ * to the first text/thinking/tool event (the UI-overhead-to-first-token
+ * metric in §7). A stream with no content events reports its total time at
+ * the end. The callback never throws into the stream.
+ */
+export function withFirstTokenTiming(provider: Provider, onFirstToken: (ms: number) => void): Provider {
+  return {
+    capabilities: provider.capabilities,
+    async *stream(req: StreamRequest): AsyncGenerator<ProviderEvent> {
+      const start = Date.now();
+      let reported = false;
+      const report = (): void => {
+        if (reported) return;
+        reported = true;
+        try {
+          onFirstToken(Date.now() - start);
+        } catch {
+          // timing must never break the stream
+        }
+      };
+      for await (const event of provider.stream(req)) {
+        if (event.type === "text_delta" || event.type === "thinking_delta" || event.type === "tool_call_start") {
+          report();
+        }
+        yield event;
+      }
+      report();
     },
   };
 }

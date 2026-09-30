@@ -1,0 +1,28 @@
+name: "CodeAgent"
+description: "Run a CodeAgent task headlessly (JSON/stream-JSON, stable exit codes)."
+inputs:
+  task:
+    description: "Task prompt for the agent."
+    required: true
+  model:
+    description: "Model id (falls back to $MODEL / provider default)."
+    required: false
+    default: ""
+  output-format:
+    description: "text | json | stream-json"
+    required: false
+    default: "text"
+  api-key:
+    description: "OPENAI_API_KEY (or provider key). Prefer repository secrets."
+    required: false
+    default: ""
+runs:
+  using: "composite"
+  steps:
+    - run: |
+        if [ -n "${{ inputs.api-key }}" ]; then export OPENAI_API_KEY="${{ inputs.api-key }}"; fi
+        npx -y codeagent --print "${{ inputs.task }}" ${{ inputs.model && format('--model {0}', inputs.model) }} --output-format "${{ inputs.output-format }}"
+      shell: bash
+branding:
+  icon: "terminal"
+  color: "blue"

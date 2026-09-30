@@ -103,6 +103,10 @@ describe("remaining slice", () => {
   it("small-model detection, tool filter, JSON repair", () => {
     expect(isSmallModel("openai/gpt-oss-20b")).toBe(true);
     expect(isSmallModel("gpt-5.6-luna")).toBe(false);
+    // Size suffixes need a digit boundary: 27B is not a 7B-class model.
+    expect(isSmallModel("Qwen3.8-27B")).toBe(false);
+    expect(isSmallModel("qwen2.5-coder:7b")).toBe(true);
+    expect(isSmallModel("llama-8b")).toBe(true);
     expect(filterToolsForSmallModel(["read", "bash_output", "write_file"])).toEqual(["read", "write_file"]);
     expect(repairToolArgumentsJson("{'a':1,}")).toContain('"a"');
     expect(repairToolArgumentsJson("")).toBe("{}");

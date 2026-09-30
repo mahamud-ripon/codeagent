@@ -30,7 +30,7 @@ export interface HeadlessResult {
   finalMessage: string;
   iterations: number;
   modifiedFiles: string[];
-  usage?: { input: number; output: number; costUsd?: number };
+  usage?: { input: number; output: number; costUsd?: number; cachedInput?: number };
 }
 
 export function renderJsonResult(result: HeadlessResult): string {

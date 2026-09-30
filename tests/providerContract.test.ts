@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { chatChunkToEvents } from "../src/llm/stream.js";
-import { anthropicChunkToEvents } from "../src/llm/anthropic.js";
+import { anthropicChunkToEvents, createAnthropicProvider, parseSseStream } from "../src/llm/anthropic.js";
+import { createGeminiProvider } from "../src/llm/gemini.js";
 import { geminiChunkToEvents } from "../src/llm/gemini.js";
 import { responsesChunkToEvents } from "../src/llm/responsesStream.js";
 import { isRetryableProviderError, parseRetryAfterMs } from "../src/llm/retry.js";
@@ -25,6 +26,14 @@ describe("provider contracts + faults", () => {
     expect(events[0]).toEqual({ type: "text_delta", text: "Hello" });
     expect(events).toContainEqual({ type: "tool_call_start", id: "c1", name: "read" });
     expect(events[events.length - 1]).toEqual({ type: "stop", finishReason: "tool_calls" });
+  });
+
+  it("chat delta.reasoning folds to thinking_delta (proxy variant)", () => {
+    const events = chatChunkToEvents(
+      { choices: [{ delta: { reasoning: "check the loop" } }] } as never,
+      new Map(),
+    );
+    expect(events).toEqual([{ type: "thinking_delta", text: "check the loop" }]);
   });
 
   it("429 maps to retryable with Retry-After parsed", () => {
@@ -61,5 +70,75 @@ describe("provider contracts + faults", () => {
     );
     expect(ev).toContainEqual({ type: "usage", input: 4, output: 2, cachedInput: undefined });
     expect(ev[ev.length - 1]).toEqual({ type: "stop", finishReason: "stop" });
+  });
+
+  it("parseSseStream decodes Uint8Array chunks (Node 22 live bodies)", async () => {    // Shared by the Anthropic, Gemini and Responses adapters: byte chunks
+    // split mid-line must still parse (live-SSE fix).
+    const enc = new TextEncoder();
+    const frames = [
+      `event: content_block_delta\ndata: {"delta":{"type":"text_delta","text":"he"}}\n\n`,
+      `event: message_stop\ndata: {}\n\n`,
+      "data: [DONE]\n\n",
+    ];
+    const body = (async function* (): AsyncGenerator<Uint8Array> {
+      for (const f of frames) {
+        const bytes = enc.encode(f);
+        yield bytes.slice(0, 11);
+        yield bytes.slice(11);
+      }
+    })();
+    const out: Array<{ event: string; data: unknown }> = [];
+    for await (const frame of parseSseStream(body)) out.push(frame);
+    expect(out).toHaveLength(2);
+    expect(out[0]).toEqual({ event: "content_block_delta", data: { delta: { type: "text_delta", text: "he" } } });
+    expect(out[1]).toEqual({ event: "message_stop", data: {} });
+  });
+
+  it("anthropic folds history systems into the system param (none in messages)", async () => {
+    let body: Record<string, unknown> = {};
+    const fetchImpl = (async (_u: unknown, init: unknown) => {
+      body = JSON.parse((init as { body?: string }).body ?? "{}") as Record<string, unknown>;
+      return { ok: true, text: async () => "", body: (async function* () {})() };
+    }) as unknown as typeof fetch;
+    const provider = createAnthropicProvider({ model: "test-model", apiKey: "k", fetchImpl });
+    // Drain (empty stream): only the request shape is under test.
+    for await (const _ of provider.stream({
+      system: "REQ",
+      messages: [
+        { role: "system", content: "<repository>ctx</repository>" },
+        { role: "user", content: "hi" },
+      ],
+      tools: false,
+    })) {
+      // no events from an empty body
+    }
+    const systemText = typeof body.system === "string" ? body.system : JSON.stringify(body.system);
+    expect(systemText).toContain("REQ");
+    expect(systemText).toContain("<repository>ctx</repository>");
+    for (const m of body.messages as Array<{ role: string }>) expect(m.role).not.toBe("system");
+  });
+
+  it("gemini folds history systems into system_instruction", async () => {
+    let body: Record<string, unknown> = {};
+    const fetchImpl = (async (_u: unknown, init: unknown) => {
+      body = JSON.parse((init as { body?: string }).body ?? "{}") as Record<string, unknown>;
+      return { ok: true, text: async () => "", body: (async function* () {})() };
+    }) as unknown as typeof fetch;
+    const provider = createGeminiProvider({ model: "test-model", apiKey: "k", fetchImpl });
+    for await (const _ of provider.stream({
+      system: "REQ",
+      messages: [
+        { role: "system", content: "<repository>ctx</repository>" },
+        { role: "user", content: "hi" },
+      ],
+      tools: false,
+    })) {
+      // no events from an empty body
+    }
+    const instruction = (
+      body.system_instruction as { parts: Array<{ text: string }> }
+    ).parts.map((p) => p.text).join("\n");
+    expect(instruction).toContain("REQ");
+    expect(instruction).toContain("<repository>ctx</repository>");
   });
 });

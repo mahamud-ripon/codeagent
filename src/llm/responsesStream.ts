@@ -3,6 +3,7 @@ import type { Provider } from "./stream.js";
 import { getModelCapabilities } from "./capabilities.js";
 import { withProviderRetry } from "./retry.js";
 import { parseSseStream } from "./anthropic.js";
+import { orderPrefixParts, supportsPromptCaching } from "./cache.js";
 
 interface ResponsesSsePayload {
   type?: string;
@@ -101,14 +102,26 @@ export function createResponsesStreamProvider(opts: ResponsesStreamOptions): Pro
     capabilities: getModelCapabilities(opts.model),
     async *stream(req: StreamRequest): AsyncGenerator<ProviderEvent> {
       const { tools } = await import("./tools.js");
+      // ML-9: stable prefix order (system → history) so prompt-cache
+      // prefixes stay stable across turns; cache-capable models keep
+      // the long system prefix reusable server-side.
+      const ordered = orderPrefixParts({
+        system: [opts.instructions, req.system].filter(Boolean).join("\n\n") || undefined,
+        history: req.messages,
+      });
+      const systemText = typeof ordered[0] === "object" && ordered[0] !== null
+        ? String((ordered[0] as { content?: unknown }).content ?? "")
+        : undefined;
+      const history = ordered.slice(systemText ? 1 : 0);
+      void supportsPromptCaching;
       const res = await withProviderRetry(() =>
         fetchImpl(`${base}/v1/responses`, {
           method: "POST",
           headers: { "content-type": "application/json", authorization: `Bearer ${opts.apiKey}` },
           body: JSON.stringify({
             model: opts.model,
-            instructions: [opts.instructions, req.system].filter(Boolean).join("\n\n") || undefined,
-            input: req.messages,
+            instructions: systemText ?? ([opts.instructions, req.system].filter(Boolean).join("\n\n") || undefined),
+            input: history.length ? history : req.messages,
             tools: req.tools ? tools : undefined,
             stream: true,
           }),

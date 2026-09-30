@@ -108,22 +108,36 @@ export async function runSubagent(
   let systemPrompt = options?.systemPrompt
     ?? (subagentType === "plan" ? PLAN_SYSTEM_PROMPT : subagentType === "reviewer" ? REVIEWER_SYSTEM_PROMPT : EXPLORE_SYSTEM_PROMPT);
   // User-defined subagents (AG-12): resolve Markdown defs by name when no explicit prompt given.
+  // Def `tools` restrict the call set; def `model` selects the responder model.
+  let defTools: string[] | undefined;
+  let defModel: string | undefined;
   if (!options?.systemPrompt && subagentType !== "explore" && subagentType !== "plan" && subagentType !== "reviewer") {
     try {
       const { loadSubagentDefs } = await import("./subagentsRegistry.js");
       const defs = await loadSubagentDefs(options?.repoRoot ?? repoRoot);
       const def = defs.find((d) => d.name === subagentType);
       if (def?.systemPrompt) systemPrompt = def.systemPrompt;
+      defTools = def?.tools;
+      defModel = def?.model;
     } catch {
       // fall back to explorer prompt
     }
   }
-  const allowed = options?.allowedTools ? new Set(options.allowedTools) : ALLOWED_SUBAGENT_TOOLS;
+  // AG-12 enforcement: effective allow-set is def.tools ?? explicit allowedTools ?? read-only base.
+  const effectiveAllowed = new Set(
+    options?.allowedTools ?? defTools ?? [...BASE_ALLOWED_SUBAGENT_TOOLS],
+  );
+  const allowed = effectiveAllowed;
+  const providerOverrides = {
+    ...(options?.providerOverrides ?? {}),
+    // Def model wins when the caller did not pin one explicitly.
+    ...(defModel && !options?.providerOverrides?.model ? { model: defModel } : {}),
+  };
   const responder =
     options?.responder ??
     (options?.createResponder
-      ? options.createResponder(options.providerOverrides)
-      : createProviderFromEnv(process.env, options?.providerOverrides).responder);
+      ? options.createResponder(providerOverrides)
+      : createProviderFromEnv(process.env, providerOverrides).responder);
 
   const history: unknown[] = [
     { role: "system", content: systemPrompt },
@@ -150,15 +164,11 @@ export async function runSubagent(
       const callId = call.call_id ?? `subcall-${i}`;
       const name = String(call.name ?? "unknown");
 
-      if (!ALLOWED_SUBAGENT_TOOLS.has(name)) {
-        const errorMsg = `TOOL ERROR (${name}): Subagents only have read-only permissions. Cannot call '${name}'.`;
-        history.push({ type: "function_call_output", call_id: callId, output: errorMsg });
-        continue;
-      }
-
-      // When a custom allowed-tools set is active, enforce it (AG-12).
-      if (allowed !== ALLOWED_SUBAGENT_TOOLS && !allowed.has(name)) {
-        const errorMsg = `TOOL ERROR (${name}): Subagent '${subagentType}' cannot call '${name}'.`;
+      // AG-12: enforce the effective allow-set (def.tools or read-only base).
+      if (!allowed.has(name)) {
+        const errorMsg = options?.allowedTools || defTools
+          ? `TOOL ERROR (${name}): Subagent '${subagentType}' cannot call '${name}'. Allowed: ${[...allowed].join(", ")}.`
+          : `TOOL ERROR (${name}): Subagents only have read-only permissions. Cannot call '${name}'.`;
         history.push({ type: "function_call_output", call_id: callId, output: errorMsg });
         continue;
       }

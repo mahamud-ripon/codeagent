@@ -285,4 +285,46 @@ export class PermissionManager {
     if (this.matches(this.denyRules, "Read", filePath)) return false;
     return true;
   }
+
+  /**
+   * EX-1: per-tool MCP permission. Rules look like MCP(server:*),
+   * MCP(server:tool), or MCP(*). Deny wins; default asks via handler,
+   * fail-closed headless when no handler is present. Bypass allows all.
+   */
+  async checkMcp(server: string, tool: string): Promise<boolean> {
+    if (this.isAutoApprove()) return true;
+    const denied = this.denyRules.some(
+      (r) => r.tool.toLowerCase() === "mcp" && matchMcpPattern(r.pattern, server, tool),
+    );
+    if (denied) return false;
+    const allowed = this.allowRules.some(
+      (r) => r.tool.toLowerCase() === "mcp" && matchMcpPattern(r.pattern, server, tool),
+    );
+    if (allowed) return true;
+    if (!this.handler) return false;
+    return this.handler({ type: "command", target: `mcp__${server}__${tool}`, details: "mcp-tool" });
+  }
+}
+
+/**
+ * Match an MCP rule pattern (inside MCP(...)) against server/tool.
+ * Patterns: "*" | "server:*" | "server:tool" | "*:tool". Tool side supports
+ * "*" prefix globs via matchPath semantics (case-insensitive).
+ */
+function matchMcpPattern(pattern: string, server: string, tool: string): boolean {
+  const pat = pattern.trim();
+  if (pat === "*" || pat === "*:*") return true;
+  const colon = pat.indexOf(":");
+  if (colon === -1) {
+    return pat.toLowerCase() === server.toLowerCase() || pat.toLowerCase() === `${server}:${tool}`.toLowerCase();
+  }
+  const sPat = pat.slice(0, colon).trim();
+  const tPat = pat.slice(colon + 1).trim();
+  const serverOk = sPat === "*" || sPat.toLowerCase() === server.toLowerCase();
+  if (!serverOk) return false;
+  if (tPat === "*" || tPat === "**") return true;
+  if (tPat.endsWith("*")) {
+    return tool.toLowerCase().startsWith(tPat.slice(0, -1).toLowerCase());
+  }
+  return tPat.toLowerCase() === tool.toLowerCase();
 }

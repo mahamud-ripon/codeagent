@@ -21,29 +21,52 @@ async function git(repoRoot: string, args: string[]): Promise<string> {
   }
 }
 
+const gitRepoCache = new Map<string, boolean>();
+
+export async function isGitRepo(repoRoot: string): Promise<boolean> {
+  if (gitRepoCache.has(repoRoot)) return gitRepoCache.get(repoRoot)!;
+  try {
+    const { stdout } = await execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], {
+      cwd: repoRoot,
+      timeout: 5000,
+    });
+    const inside = stdout.trim() === "true";
+    gitRepoCache.set(repoRoot, inside);
+    return inside;
+  } catch {
+    gitRepoCache.set(repoRoot, false);
+    return false;
+  }
+}
+
+export function clearGitRepoCache(repoRoot?: string): void {
+  if (repoRoot) gitRepoCache.delete(repoRoot);
+  else gitRepoCache.clear();
+}
+
 export async function gitStatus(repoRoot: string): Promise<string> {
+  if (!(await isGitRepo(repoRoot))) {
+    return "(not a git repository — git tools are unavailable in this environment; verify files directly with read or list_files)";
+  }
   const out = await git(repoRoot, ["status", "--short"]);
   return truncate(out, TRUNCATION_BUDGETS.gitStatus);
 }
 
 export async function gitDiff(repoRoot: string): Promise<string> {
+  if (!(await isGitRepo(repoRoot))) {
+    return "(not a git repository — git diff unavailable in this environment; verify files directly with read or list_files)";
+  }
   const out = await git(repoRoot, ["diff", "--no-ext-diff"]);
   return truncate(out || "(no changes)", TRUNCATION_BUDGETS.gitDiff);
 }
 
 export async function gitLog(repoRoot: string, limit = 20): Promise<string> {
+  if (!(await isGitRepo(repoRoot))) {
+    return "(not a git repository — git log unavailable in this environment)";
+  }
   const n = Math.min(Math.max(Math.floor(limit) || 20, 1), 100);
   const out = await git(repoRoot, ["log", "--oneline", "-n", String(n)]);
   return truncate(out, TRUNCATION_BUDGETS.gitStatus);
-}
-
-export async function isGitRepo(repoRoot: string): Promise<boolean> {
-  try {
-    const out = await git(repoRoot, ["rev-parse", "--is-inside-work-tree"]);
-    return out.trim() === "true";
-  } catch {
-    return false;
-  }
 }
 
 /**

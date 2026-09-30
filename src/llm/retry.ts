@@ -79,7 +79,7 @@ export function isRetryableProviderError(error: unknown): boolean {
   if (status === 408 || status === 413) return true;
   if (status !== undefined && status >= 400 && status < 500) return false;
   if (isRateLimitError(message)) return true;
-  return /timeout|timed out|econnreset|econnrefused|enotfound|eai_again|socket hang up|network|fetch failed|truncated|unexpected end|service unavailable|bad gateway|gateway timeout/i.test(
+  return /timeout|timed out|econnreset|econnrefused|enotfound|eai_again|socket hang up|network|fetch failed|truncated|unexpected end|service unavailable|bad gateway|gateway timeout|no_available_workers|no available workers|circuits open/i.test(
     message,
   );
 }
