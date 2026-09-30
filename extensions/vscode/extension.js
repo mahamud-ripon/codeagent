@@ -32,6 +32,12 @@ function shouldAutoApprove() {
   return config.get("autoApprove", true);
 }
 
+function getModel() {
+  const config = vscode.workspace.getConfiguration("codeagent");
+  const model = config.get("model");
+  return (typeof model === "string" && model.trim()) ? model.trim() : undefined;
+}
+
 function send(msg) {
   if (!proc) throw new Error("CodeAgent bridge is not running.");
   proc.stdin.write(`${JSON.stringify(msg)}\n`);
@@ -157,16 +163,22 @@ async function executeTask(taskPrompt, repoPath) {
   try {
     await ensureBridge();
     const id = nextId++;
+    const runParams = {
+      task: taskPrompt,
+      repoRoot,
+      autoApprove: shouldAutoApprove(),
+    };
+    const model = getModel();
+    if (model) {
+      runParams.model = model;
+    }
     const result = await new Promise((resolve, reject) => {
       pending.set(id, { resolve, reject });
       send({
         jsonrpc: "2.0",
         id,
         method: "agent/run",
-        params: {
-          task: taskPrompt,
-          repoRoot,
-        },
+        params: runParams,
       });
     });
 

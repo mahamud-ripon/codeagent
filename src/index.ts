@@ -398,7 +398,7 @@ async function main(): Promise<void> {
 
   if (args.acp) {
     const { startAcpServer } = await import("./integrations/acp.js");
-    await startAcpServer(repoRoot);
+    await startAcpServer(repoRoot, { autoApprove: args.autoApprove });
     return;
   }
 

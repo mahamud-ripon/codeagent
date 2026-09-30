@@ -119,6 +119,11 @@
           "type": "boolean",
           "default": true,
           "description": "Automatically approve tool operations without interactive confirmation."
+        },
+        "codeagent.model": {
+          "type": "string",
+          "default": "",
+          "description": "Optional model override (e.g. 'qwen/qwen3.8-27b', 'gpt-4o', 'claude-3-5-sonnet'). If empty, uses $MODEL from workspace .env or ~/.codeagent/.env."
         }
       }
     }
