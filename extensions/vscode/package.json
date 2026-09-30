@@ -124,6 +124,11 @@
           "type": "string",
           "default": "",
           "description": "Optional model override (e.g. 'qwen/qwen3.8-27b', 'gpt-4o', 'claude-3-5-sonnet'). If empty, uses $MODEL from workspace .env or ~/.codeagent/.env."
+        },
+        "codeagent.maxIterations": {
+          "type": "number",
+          "default": 30,
+          "description": "Maximum number of agent iterations per task (default: 30)."
         }
       }
     }

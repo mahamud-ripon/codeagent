@@ -51,6 +51,10 @@ export async function evaluateStopHooks(context: StopHookContext): Promise<StopH
 
   // 3. Compiler Diagnostics check: verify all modified files are syntax-clean
   for (const filePath of context.modifiedFiles) {
+    const base = filePath.toLowerCase();
+    if (base.includes(".config.") || base.endsWith("package.json") || base.endsWith("tsconfig.json")) {
+      continue;
+    }
     try {
       const diags = await getQuickDiagnostics(context.repoRoot, filePath);
       if (diags && diags.trim()) {

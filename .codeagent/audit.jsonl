@@ -4,3 +4,9 @@
 {"ts":"2026-09-30T04:26:02.939Z","repo":"D:\\Codeagent","kind":"permission","tool":"run_command","args":{"command":"drop database"},"decision":"deny","detail":"command denied"}
 {"ts":"2026-09-30T04:26:40.847Z","repo":"D:\\Codeagent","kind":"permission","tool":"run_command","args":{"command":"drop database"},"decision":"deny","detail":"command denied"}
 {"ts":"2026-09-30T17:30:34.967Z","repo":"D:\\Codeagent","kind":"permission","tool":"run_command","args":{"command":"drop database"},"decision":"deny","detail":"command denied"}
+{"ts":"2026-09-30T20:59:51.057Z","repo":"D:\\Codeagent","kind":"permission","tool":"run_command","args":{"command":"drop database"},"decision":"deny","detail":"command denied"}
+{"ts":"2026-09-30T21:03:16.782Z","repo":"D:\\Codeagent","kind":"permission","tool":"run_command","args":{"command":"drop database"},"decision":"deny","detail":"command denied"}
+{"ts":"2026-09-30T21:04:19.303Z","repo":"D:\\Codeagent","kind":"permission","tool":"run_command","args":{"command":"drop database"},"decision":"deny","detail":"command denied"}
+{"ts":"2026-09-30T21:27:38.420Z","repo":"D:\\Codeagent","kind":"permission","tool":"run_command","args":{"command":"drop database"},"decision":"deny","detail":"command denied"}
+{"ts":"2026-09-30T21:38:36.228Z","repo":"D:\\Codeagent","kind":"permission","tool":"run_command","args":{"command":"drop database"},"decision":"deny","detail":"command denied"}
+{"ts":"2026-09-30T21:39:19.428Z","repo":"D:\\Codeagent","kind":"permission","tool":"run_command","args":{"command":"drop database"},"decision":"deny","detail":"command denied"}

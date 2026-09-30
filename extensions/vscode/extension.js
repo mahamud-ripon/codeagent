@@ -38,6 +38,12 @@ function getModel() {
   return (typeof model === "string" && model.trim()) ? model.trim() : undefined;
 }
 
+function getMaxIterations() {
+  const config = vscode.workspace.getConfiguration("codeagent");
+  const it = config.get("maxIterations");
+  return typeof it === "number" && it > 0 ? it : 30;
+}
+
 function send(msg) {
   if (!proc) throw new Error("CodeAgent bridge is not running.");
   proc.stdin.write(`${JSON.stringify(msg)}\n`);
@@ -167,6 +173,7 @@ async function executeTask(taskPrompt, repoPath) {
       task: taskPrompt,
       repoRoot,
       autoApprove: shouldAutoApprove(),
+      maxIterations: getMaxIterations(),
     };
     const model = getModel();
     if (model) {
@@ -196,6 +203,118 @@ async function executeTask(taskPrompt, repoPath) {
   }
 }
 
+function handleSlashCommand(rawCmd) {
+  const parts = rawCmd.split(/\s+/);
+  const cmd = parts[0].toLowerCase();
+  const arg = parts.slice(1).join(" ").trim();
+
+  if (chatViewProvider) {
+    chatViewProvider.showUserMessage(rawCmd);
+  }
+
+  switch (cmd) {
+    case "/clear":
+    case "/new":
+      if (chatViewProvider) {
+        chatViewProvider.clearChat();
+      }
+      break;
+
+    case "/help": {
+      const helpMd = [
+        "### 💡 CodeAgent Slash Commands",
+        "",
+        "- `/help` — Show this help message",
+        "- `/clear` or `/new` — Clear chat history & reset session",
+        "- `/status` — Display current configuration & environment",
+        "- `/sessions` — List saved conversation sessions",
+        "- `/model [name]` — View or switch LLM model override",
+        "",
+        "*Tip: Type any regular coding prompt without `/` to run tasks!*",
+      ].join("\n");
+      if (chatViewProvider) {
+        chatViewProvider.showAgentMessage(helpMd);
+      }
+      break;
+    }
+
+    case "/status": {
+      const model = getModel() || "(from env)";
+      const maxIter = getMaxIterations();
+      const autoApprove = shouldAutoApprove();
+      const folders = vscode.workspace.workspaceFolders || [];
+      const repoRoot = folders[0] ? folders[0].uri.fsPath : "(no folder open)";
+
+      const statusMd = [
+        "### ⚙️ CodeAgent Status",
+        "",
+        `- **Workspace Root**: \`${repoRoot}\``,
+        `- **Active Model**: \`${model}\``,
+        `- **Max Turn Limit**: \`${maxIter}\``,
+        `- **Auto Approve Tools**: \`${autoApprove}\``,
+        `- **CLI Path**: \`${getCliCommand()}\``,
+      ].join("\n");
+      if (chatViewProvider) {
+        chatViewProvider.showAgentMessage(statusMd);
+      }
+      break;
+    }
+
+    case "/sessions": {
+      const folders = vscode.workspace.workspaceFolders || [];
+      const repoRoot = folders[0] ? folders[0].uri.fsPath : undefined;
+      let sessionInfo = "### 📂 CodeAgent Sessions\n\n";
+      try {
+        const fs = require("node:fs");
+        const path = require("node:path");
+        const sessionsDir = repoRoot ? path.join(repoRoot, ".codeagent", "sessions") : null;
+        if (sessionsDir && fs.existsSync(sessionsDir)) {
+          const files = fs.readdirSync(sessionsDir).filter((f) => f.endsWith(".json") || f.endsWith(".jsonl"));
+          if (files.length > 0) {
+            sessionInfo += `Found **${files.length}** saved session(s) in this workspace:\n`;
+            for (const f of files.slice(0, 10)) {
+              sessionInfo += `- \`${f}\`\n`;
+            }
+          } else {
+            sessionInfo += "No saved sessions found in `.codeagent/sessions/`. Start coding to create sessions!\n";
+          }
+        } else {
+          sessionInfo += "No `.codeagent/sessions` directory found in the active workspace.\n";
+        }
+      } catch (e) {
+        sessionInfo += `Could not read sessions: ${e.message}\n`;
+      }
+      sessionInfo += "\n*Use `/new` or `/clear` to start a fresh turn.*";
+      if (chatViewProvider) {
+        chatViewProvider.showAgentMessage(sessionInfo);
+      }
+      break;
+    }
+
+    case "/model": {
+      if (arg) {
+        const config = vscode.workspace.getConfiguration("codeagent");
+        config.update("model", arg, vscode.ConfigurationTarget.Global);
+        if (chatViewProvider) {
+          chatViewProvider.showAgentMessage(`✅ Switched model override to \`${arg}\`.`);
+        }
+      } else {
+        const current = getModel() || "(from env)";
+        if (chatViewProvider) {
+          chatViewProvider.showAgentMessage(`**Current Model**: \`${current}\`\n\nTo change: \`/model <model_name>\` (e.g. \`/model llama-3.3-70b-versatile\`)`);
+        }
+      }
+      break;
+    }
+
+    default:
+      if (chatViewProvider) {
+        chatViewProvider.showAgentMessage(`Unknown command \`${cmd}\`. Type \`/help\` to see available slash commands.`);
+      }
+      break;
+  }
+}
+
 class CodeAgentChatViewProvider {
   constructor(extensionUri) {
     this._extensionUri = extensionUri;
@@ -216,8 +335,13 @@ class CodeAgentChatViewProvider {
       switch (data.type) {
         case "runTask":
           if (data.prompt && data.prompt.trim()) {
+            const prompt = data.prompt.trim();
+            if (prompt.startsWith("/")) {
+              handleSlashCommand(prompt);
+              return;
+            }
             try {
-              await executeTask(data.prompt.trim());
+              await executeTask(prompt);
             } catch (e) {
               vscode.window.showErrorMessage(`CodeAgent: ${e.message}`);
             }
@@ -240,6 +364,26 @@ class CodeAgentChatViewProvider {
       this._view.show?.(true);
       this._view.webview.postMessage({ type: "userMessage", text: prompt });
       this._view.webview.postMessage({ type: "agentStart" });
+    }
+  }
+
+  showUserMessage(text) {
+    if (this._view) {
+      this._view.show?.(true);
+      this._view.webview.postMessage({ type: "userMessage", text });
+    }
+  }
+
+  showAgentMessage(text) {
+    if (this._view) {
+      this._view.show?.(true);
+      this._view.webview.postMessage({ type: "agentDirectMessage", text });
+    }
+  }
+
+  clearChat() {
+    if (this._view) {
+      this._view.webview.postMessage({ type: "clear" });
     }
   }
 
@@ -348,21 +492,69 @@ class CodeAgentChatViewProvider {
       60% { content: ".."; }
       80%, 100% { content: "..."; }
     }
-    .tool-badge {
-      display: inline-flex;
+    .tool-group {
+      margin: 6px 0;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 6px;
+      background: var(--vscode-editor-inactiveSelectionBackground);
+      overflow: hidden;
+      font-size: 11.5px;
+      max-width: 100%;
+    }
+    .tool-group-summary {
+      display: flex;
       align-items: center;
-      gap: 5px;
-      padding: 3px 8px;
-      background: var(--vscode-badge-background);
-      color: var(--vscode-badge-foreground);
-      border-radius: 4px;
-      font-size: 11px;
-      margin: 2px 0;
+      gap: 6px;
+      padding: 6px 10px;
+      cursor: pointer;
+      user-select: none;
+      background: var(--vscode-sideBar-background);
+      color: var(--vscode-foreground);
       font-family: var(--vscode-editor-font-family, monospace);
-      max-width: 90%;
+      outline: none;
+      list-style: none;
+    }
+    .tool-group-summary::-webkit-details-marker {
+      display: none;
+    }
+    .tool-group-summary:hover {
+      background: var(--vscode-list-hoverBackground);
+    }
+    .tool-group-icon {
+      font-size: 12px;
+      color: var(--vscode-textLink-foreground);
+    }
+    .tool-group-label {
+      flex-shrink: 0;
+    }
+    .tool-group-active {
+      color: var(--vscode-descriptionForeground);
+      white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
+      font-size: 10.5px;
+      margin-left: 4px;
+    }
+    .tool-group-list {
+      max-height: 180px;
+      overflow-y: auto;
+      padding: 4px 8px;
+      background: var(--vscode-editor-background);
+      border-top: 1px solid var(--vscode-panel-border);
+      font-family: var(--vscode-editor-font-family, monospace);
+    }
+    .tool-item {
+      padding: 2px 4px;
+      color: var(--vscode-descriptionForeground);
+      font-size: 11px;
       white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      border-radius: 3px;
+    }
+    .tool-item:hover {
+      background: var(--vscode-list-hoverBackground);
+      color: var(--vscode-foreground);
     }
     .code-block {
       background: var(--vscode-textCodeBlock-background);
@@ -481,6 +673,23 @@ class CodeAgentChatViewProvider {
     const statsSpan = document.getElementById("stats");
 
     let currentAgentMsg = null;
+    let currentToolGroup = null;
+    let currentToolGroupCount = 0;
+    let currentToolGroupSummary = null;
+    let currentToolGroupList = null;
+    let toolBreakdown = {};
+
+    function finishToolGroup() {
+      if (currentToolGroup) {
+        currentToolGroup.open = false;
+        const breakdownStr = Object.entries(toolBreakdown).map(([k, v]) => v + " " + k).join(", ");
+        currentToolGroupSummary.innerHTML =
+          '<span class="tool-group-icon">✓</span> <span class="tool-group-label"><strong>' +
+          currentToolGroupCount + ' action' + (currentToolGroupCount > 1 ? 's' : '') + ' completed</strong> (' +
+          breakdownStr + ')</span>';
+        currentToolGroup = null;
+      }
+    }
 
     function escapeHtml(str) {
       return String(str)
@@ -533,6 +742,7 @@ class CodeAgentChatViewProvider {
       messagesDiv.innerHTML = '<div class="msg agent">Hello! I am CodeAgent. Ask me to fix a bug, refactor code, write tests, or build new features.</div>';
       statsSpan.textContent = "Ready";
       currentAgentMsg = null;
+      currentToolGroup = null;
     });
 
     input.addEventListener("keydown", (e) => {
@@ -546,6 +756,7 @@ class CodeAgentChatViewProvider {
       const msg = e.data;
       switch (msg.type) {
         case "userMessage": {
+          finishToolGroup();
           const div = document.createElement("div");
           div.className = "msg user";
           div.textContent = msg.text;
@@ -557,6 +768,7 @@ class CodeAgentChatViewProvider {
           break;
         }
         case "agentStart": {
+          finishToolGroup();
           currentAgentMsg = document.createElement("div");
           currentAgentMsg.className = "msg agent thinking";
           currentAgentMsg.innerHTML = '<span class="thinking-text">Thinking<span class="thinking-dots"></span></span>';
@@ -564,7 +776,27 @@ class CodeAgentChatViewProvider {
           scrollToBottom();
           break;
         }
+        case "agentDirectMessage": {
+          finishToolGroup();
+          cancelBtn.style.display = "none";
+          sendBtn.disabled = false;
+          statsSpan.textContent = "Ready";
+          const div = document.createElement("div");
+          div.className = "msg agent";
+          renderMarkdown(div, msg.text);
+          messagesDiv.appendChild(div);
+          scrollToBottom();
+          break;
+        }
+        case "clear": {
+          messagesDiv.innerHTML = '<div class="msg agent">Hello! I am CodeAgent. Ask me to fix a bug, refactor code, write tests, or build new features.</div>';
+          statsSpan.textContent = "Ready";
+          currentAgentMsg = null;
+          currentToolGroup = null;
+          break;
+        }
         case "textDelta": {
+          finishToolGroup();
           if (!currentAgentMsg) {
             currentAgentMsg = document.createElement("div");
             currentAgentMsg.className = "msg agent";
@@ -584,16 +816,47 @@ class CodeAgentChatViewProvider {
             currentAgentMsg.remove();
             currentAgentMsg = null;
           }
-          const badge = document.createElement("div");
-          badge.className = "tool-badge";
+          if (!currentToolGroup) {
+            currentToolGroup = document.createElement("details");
+            currentToolGroup.className = "tool-group";
+            currentToolGroup.open = true;
+
+            currentToolGroupSummary = document.createElement("summary");
+            currentToolGroupSummary.className = "tool-group-summary";
+
+            currentToolGroupList = document.createElement("div");
+            currentToolGroupList.className = "tool-group-list";
+
+            currentToolGroup.appendChild(currentToolGroupSummary);
+            currentToolGroup.appendChild(currentToolGroupList);
+            messagesDiv.appendChild(currentToolGroup);
+
+            currentToolGroupCount = 0;
+            toolBreakdown = {};
+          }
+
+          currentToolGroupCount++;
+          toolBreakdown[msg.name] = (toolBreakdown[msg.name] || 0) + 1;
+
           let extra = "";
           if (msg.args && typeof msg.args === "object") {
             const vals = Object.values(msg.args).filter(v => typeof v === "string" && v.length < 80);
             if (vals.length > 0) extra = " · " + vals[0];
           }
-          badge.textContent = "⚙ " + msg.name + extra;
-          badge.title = JSON.stringify(msg.args || {}, null, 2);
-          messagesDiv.appendChild(badge);
+
+          const breakdownStr = Object.entries(toolBreakdown).map(([k, v]) => v + " " + k).join(", ");
+          currentToolGroupSummary.innerHTML =
+            '<span class="tool-group-icon">⚙</span> ' +
+            '<span class="tool-group-label"><strong>' + currentToolGroupCount + ' action' + (currentToolGroupCount > 1 ? 's' : '') + '</strong> (' + breakdownStr + ')</span> ' +
+            '<span class="tool-group-active">· ' + escapeHtml(msg.name + extra) + '</span>';
+
+          const item = document.createElement("div");
+          item.className = "tool-item";
+          item.textContent = "• " + msg.name + extra;
+          item.title = JSON.stringify(msg.args || {}, null, 2);
+          currentToolGroupList.appendChild(item);
+          currentToolGroupList.scrollTop = currentToolGroupList.scrollHeight;
+
           scrollToBottom();
           break;
         }
@@ -603,9 +866,11 @@ class CodeAgentChatViewProvider {
           break;
         }
         case "agentDone": {
+          finishToolGroup();
           cancelBtn.style.display = "none";
           sendBtn.disabled = false;
-          statsSpan.textContent = "Finished: " + (msg.result?.stopReason || "ok");
+          const stop = msg.result?.stopReason;
+          statsSpan.textContent = stop === "budget" ? "Budget reached" : stop === "stuck" ? "Stopped (stuck)" : "Finished";
           const finalMsg = msg.result?.finalMessage;
           if (currentAgentMsg) {
             if (currentAgentMsg.classList.contains("thinking")) {
@@ -629,6 +894,7 @@ class CodeAgentChatViewProvider {
           break;
         }
         case "agentError": {
+          finishToolGroup();
           cancelBtn.style.display = "none";
           sendBtn.disabled = false;
           statsSpan.textContent = "Error occurred";

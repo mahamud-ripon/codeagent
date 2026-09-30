@@ -29,8 +29,8 @@ import { writeFile } from "../src/tools/filesystem.js";
 import { FileStateCache } from "../src/tools/fileStateCache.js";
 import type { ToolCallRecord } from "../src/agent/types.js";
 
-function call(name: string, success: boolean, summary = ""): ToolCallRecord {
-  return { iteration: 1, name, args: {}, success, summary };
+function call(name: string, success: boolean, summary = "", args: Record<string, unknown> = {}): ToolCallRecord {
+  return { iteration: 1, name, args, success, summary };
 }
 
 describe("provider retry (ML-2)", () => {
@@ -301,6 +301,24 @@ describe("no-progress detector (AG-11)", () => {
     expect(
       detectNoProgress({ toolCalls: withWrites, testResults: [], errors: ["old", "old", "old"], modifiedFilesCount: 1 }).stalled,
     ).toBe(false);
+  });
+
+  it("flags repeated edit oscillation on the same file when errors persist", () => {
+    const oscCalls: ToolCallRecord[] = [
+      call("write_file", true, "", { path: "package.json" }),
+      call("run_command", false),
+      call("write_file", true, "", { path: "package.json" }),
+      call("run_command", false),
+      call("write_file", true, "", { path: "package.json" }),
+    ];
+    const verdict = detectNoProgress({
+      toolCalls: oscCalls,
+      testResults: [],
+      errors: ["err1", "err2"],
+      modifiedFilesCount: 1,
+    });
+    expect(verdict.stalled).toBe(true);
+    expect(verdict.reason).toContain("Repeated modifications to 'package.json'");
   });
 });
 

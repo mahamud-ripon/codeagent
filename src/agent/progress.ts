@@ -93,5 +93,21 @@ export function detectNoProgress(snapshot: ProgressSnapshot): ProgressVerdict {
     };
   }
 
+  // 3. Edit oscillation: repeatedly rewriting the same file while errors accumulate
+  const recentWrites = toolCalls.slice(-8).filter((c) => WRITE_TOOLS.has(c.name));
+  const editCounts = new Map<string, number>();
+  for (const c of recentWrites) {
+    const p = String(c.args?.path || "");
+    if (p) editCounts.set(p, (editCounts.get(p) ?? 0) + 1);
+  }
+  for (const [p, count] of editCounts) {
+    if (count >= 3 && errors.length >= 2) {
+      return {
+        stalled: true,
+        reason: `Repeated modifications to '${p}' (${count} times) without resolving errors. Stopping so this run can be resumed with a different approach.`,
+      };
+    }
+  }
+
   return { stalled: false };
 }

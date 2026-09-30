@@ -296,6 +296,32 @@ describe("agent loop", () => {
     expect(res.history.some((item) => (item as { call_id?: string }).call_id === "c1")).toBe(true);
     expect(res.history.some((item) => (item as { call_id?: string }).call_id === "c2")).toBe(true);
   });
+
+  it("concludes gracefully with stopReason: budget when maxIterations is reached without throwing", async () => {
+    let turn = 0;
+    const responder: Responder = async (input) => {
+      turn++;
+      return {
+        output: [fc(`c${turn}`, "read_file", { path: turn % 2 === 0 ? "math.ts" : "util.ts" })],
+        output_text: `Working on turn ${turn}`,
+      };
+    };
+
+    await writeFile(tmp, "util.ts", "export const Y = 1;\n");
+    const agent = new Agent({
+      repoRoot: tmp,
+      model: "test",
+      maxIterations: 3,
+      responder,
+      verbose: false,
+    });
+
+    const res = await agent.run("Do work across multiple files");
+    expect(res.stopReason).toBe("budget");
+    expect(res.iterations).toBe(3);
+    expect(res.finalMessage).toContain("Iteration Limit Reached");
+    expect(res.finalMessage).toContain("CodeAgent reached the maximum iteration budget");
+  });
 });
 
 

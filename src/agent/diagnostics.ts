@@ -78,6 +78,19 @@ export async function getQuickDiagnostics(
     // TypeScript module not found or failed to load — fallback to compiler run
   }
 
+  // Config files are not application source modules: do not run project tsc or eslint on them
+  const baseName = path.basename(filePath).toLowerCase();
+  if (
+    baseName.includes(".config.") ||
+    baseName.startsWith(".eslintrc") ||
+    baseName.startsWith(".prettierrc") ||
+    baseName.startsWith(".babelrc") ||
+    baseName === "package.json" ||
+    baseName === "tsconfig.json"
+  ) {
+    return null;
+  }
+
   // 2. Check for tsconfig.json to run quick typecheck
   const hasTsConfig = await fs.stat(path.join(repoRoot, "tsconfig.json")).then(() => true).catch(() => false);
   if (!hasTsConfig) {

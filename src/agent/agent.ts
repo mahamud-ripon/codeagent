@@ -382,6 +382,7 @@ export class Agent {
     let hasPromptedFinalSummary = false;
     let noActionNudges = 0;
     let stopHookRetries = 0;
+    let lastModelOutputText = "";
     const MAX_STOP_HOOK_RETRIES = 2;
     const sleep = this.options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 
@@ -393,6 +394,23 @@ export class Agent {
         this.reporter.onIterationStart(state.iteration, maxIterations, state.phase);
       } else {
         this.log(`\n--- iteration ${state.iteration}/${maxIterations} [${state.phase}] ---`);
+      }
+
+      // Proactive budget guidance when approaching maxIterations
+      if (state.iteration === maxIterations - 1 && maxIterations > 3) {
+        input.push({
+          role: "user",
+          content:
+            `⚠️ BUDGET WARNING: You have reached turn ${state.iteration} of ${maxIterations} (only 1 turn remaining). ` +
+            `Do NOT invoke new exploratory tools or extra lint/test cycles. Complete the current step and summarize your work.`,
+        });
+      } else if (state.iteration === maxIterations && maxIterations > 1) {
+        input.push({
+          role: "user",
+          content:
+            `🛑 FINAL TURN REACHED (${maxIterations}/${maxIterations}): You must conclude now without calling additional tools. ` +
+            `Provide your final response summary in Markdown explaining what was done, what files were created or modified, and how to verify.`,
+        });
       }
 
       let result;
@@ -431,6 +449,9 @@ export class Agent {
         thinkingDurationMs = Date.now() - thinkingStart;
         consecutiveApiErrors = 0;
         rateLimitRetries = 0;
+        if (result?.output_text?.trim()) {
+          lastModelOutputText = result.output_text.trim();
+        }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (isAuthError(message)) {
@@ -1111,7 +1132,56 @@ export class Agent {
       }
     }
 
-    throw new Error(`Agent exceeded max iterations (${maxIterations}) without finishing.`);
+    // Budget exhausted: rather than crashing with an unhandled exception,
+    // synthesize a structured summary and conclude with stopReason: "budget".
+    const budgetSummaryLines: string[] = [
+      `### ⚠️ Iteration Limit Reached (${maxIterations}/${maxIterations} turns)`,
+      "",
+      "CodeAgent reached the maximum iteration budget for this task before concluding all actions.",
+    ];
+
+    if (lastModelOutputText) {
+      budgetSummaryLines.push("\n#### Latest Agent Note:\n" + lastModelOutputText);
+    }
+
+    if (state.modifiedFiles.size > 0) {
+      budgetSummaryLines.push("\n#### Files Created / Modified:");
+      for (const f of state.modifiedFiles) {
+        budgetSummaryLines.push(`- \`${f}\``);
+      }
+    }
+
+    if (state.testResults.length > 0) {
+      budgetSummaryLines.push("\n#### Verification / Test Runs:");
+      for (const t of state.testResults) {
+        const icon = t.exitCode === 0 ? "✅" : "❌";
+        budgetSummaryLines.push(`- ${icon} Ran \`${t.command}\` (exit code: ${t.exitCode})`);
+      }
+    }
+
+    if (state.errors.length > 0) {
+      budgetSummaryLines.push("\n#### Diagnostic / Error Log:");
+      for (const err of state.errors.slice(-3)) {
+        budgetSummaryLines.push(`- ${err}`);
+      }
+    }
+
+    budgetSummaryLines.push(
+      "\n---\n*You can ask CodeAgent to continue from here, or review the changes in your editor.*",
+    );
+
+    const budgetResult: AgentRunResult = {
+      finalMessage: budgetSummaryLines.join("\n"),
+      iterations: maxIterations,
+      modifiedFiles: [...state.modifiedFiles],
+      testResults: state.testResults,
+      history: input,
+      intent,
+      stopReason: "budget" as const,
+      usage: { ...this.usage },
+    };
+    this.emit({ type: "done", result: budgetResult });
+    return budgetResult;
     } finally {
       this.reporter?.stop();
     }

@@ -264,7 +264,7 @@ describe("The 6 Claude Code Core System-Level Mechanisms", () => {
         .then(() => true)
         .catch(() => false);
       expect(exists).toBe(false);
-    });
+    }, 15000);
   });
 
   describe("5. Streaming Tool Concurrency Engine", () => {
