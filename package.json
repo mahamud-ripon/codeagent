@@ -1,5 +1,5 @@
 {
-  "name": "codeagent",
+  "name": "@mahamud-ripon/codeagent",
   "version": "0.7.0",
   "description": "CLI-first autonomous coding agent",
   "license": "MIT",
@@ -11,6 +11,9 @@
   "type": "module",
   "bin": {
     "codeagent": "dist/index.js"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "files": ["dist", "docs", "README.md", "LICENSE", "CHANGELOG.md"],
   "engines": {
