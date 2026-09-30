@@ -103,7 +103,12 @@ function ensureBridge() {
       args.push("--auto-approve");
     }
 
-    proc = spawn(cli, args, { stdio: ["pipe", "pipe", "inherit"] });
+    const isWin = process.platform === "win32";
+    proc = spawn(cli, args, {
+      stdio: ["pipe", "pipe", "inherit"],
+      shell: isWin,
+      windowsHide: true,
+    });
 
     proc.on("error", (e) => {
       proc = null;
