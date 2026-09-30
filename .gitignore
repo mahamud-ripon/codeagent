@@ -3,6 +3,7 @@ node_modules/
 
 # Build artifacts
 dist/
+*.vsix
 
 # Test coverage & caches
 coverage/

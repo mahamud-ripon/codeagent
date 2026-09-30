@@ -1,27 +1,127 @@
 {
   "name": "codeagent-vscode",
   "displayName": "CodeAgent",
-  "description": "Drive CodeAgent over stdio via the ACP bridge (codeagent --acp).",
+  "description": "Autonomous AI coding agent inside VS Code powered by CodeAgent ACP bridge.",
   "version": "0.7.0",
-  "publisher": "codeagent",
+  "publisher": "mahamud-ripon",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mahamud-ripon/codeagent.git"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },
-  "categories": ["AI", "Other"],
+  "categories": [
+    "AI",
+    "Programming Languages",
+    "Education",
+    "Other"
+  ],
   "main": "./extension.js",
-  "activationEvents": ["onCommand:codeagent.runTask", "onCommand:codeagent.cancelTask"],
+  "activationEvents": [
+    "onCommand:codeagent.runTask",
+    "onCommand:codeagent.cancelTask",
+    "onStartupFinished"
+  ],
   "contributes": {
     "commands": [
       {
+        "command": "codeagent.openChat",
+        "title": "CodeAgent: Open Chat Sidebar",
+        "icon": "$(comment-discussion)"
+      },
+      {
         "command": "codeagent.runTask",
-        "title": "CodeAgent: Run Task"
+        "title": "CodeAgent: Run Task from Input Box",
+        "icon": "$(sparkle)"
       },
       {
         "command": "codeagent.cancelTask",
-        "title": "CodeAgent: Cancel Task"
+        "title": "CodeAgent: Cancel Running Task",
+        "icon": "$(stop-circle)"
+      },
+      {
+        "command": "codeagent.explainCode",
+        "title": "CodeAgent: Explain Code"
+      },
+      {
+        "command": "codeagent.fixCode",
+        "title": "CodeAgent: Fix Selected Code"
+      },
+      {
+        "command": "codeagent.refactorCode",
+        "title": "CodeAgent: Refactor Selected Code"
+      },
+      {
+        "command": "codeagent.generateTests",
+        "title": "CodeAgent: Generate Unit Tests"
       }
-    ]
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "codeagent-sidebar",
+          "title": "CodeAgent",
+          "icon": "$(sparkle)"
+        }
+      ]
+    },
+    "views": {
+      "codeagent-sidebar": [
+        {
+          "type": "webview",
+          "id": "codeagent.chatView",
+          "name": "CodeAgent Assistant"
+        }
+      ]
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "codeagent.explainCode",
+          "when": "editorHasSelection",
+          "group": "codeagent@1"
+        },
+        {
+          "command": "codeagent.fixCode",
+          "when": "editorHasSelection",
+          "group": "codeagent@2"
+        },
+        {
+          "command": "codeagent.refactorCode",
+          "when": "editorHasSelection",
+          "group": "codeagent@3"
+        },
+        {
+          "command": "codeagent.generateTests",
+          "when": "editorHasSelection",
+          "group": "codeagent@4"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "codeagent.runTask",
+        "key": "ctrl+alt+a",
+        "mac": "cmd+alt+a"
+      }
+    ],
+    "configuration": {
+      "title": "CodeAgent",
+      "properties": {
+        "codeagent.cliPath": {
+          "type": "string",
+          "default": "codeagent",
+          "description": "Path to the codeagent CLI executable (default 'codeagent' on PATH)."
+        },
+        "codeagent.autoApprove": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically approve tool operations without interactive confirmation."
+        }
+      }
+    }
   },
   "scripts": {
     "vscode:package": "npx -y @vscode/vsce package --no-yarn"
