@@ -154,10 +154,11 @@ export class Agent {
       provider: options.provider,
       baseURL: options.baseURL,
     };
+    const providerResult = createProviderFromEnv(process.env, this.providerOverrides);
     this.responder =
       options.responder ??
-      createProviderFromEnv(process.env, this.providerOverrides).responder;
-    this.providerInstance = options.providerInstance;
+      providerResult.responder;
+    this.providerInstance = options.providerInstance ?? (options.responder ? undefined : providerResult.providerInstance);
     // AG-2: default to the versioned family prompt for the active model;
     // ML-4: small models get the short prompt + suffix.
     const small = options.smallModel ?? (() => {

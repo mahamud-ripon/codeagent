@@ -319,12 +319,12 @@ class CodeAgentChatViewProvider {
       font-size: 12.5px;
       max-width: 95%;
       word-wrap: break-word;
-      white-space: pre-wrap;
     }
     .user {
       align-self: flex-end;
       background-color: var(--vscode-button-background);
       color: var(--vscode-button-foreground);
+      white-space: pre-wrap;
     }
     .agent {
       align-self: flex-start;
@@ -332,17 +332,72 @@ class CodeAgentChatViewProvider {
       color: var(--vscode-editor-foreground);
       border: 1px solid var(--vscode-panel-border);
     }
+    .msg.agent.thinking {
+      color: var(--vscode-descriptionForeground);
+      font-style: italic;
+      font-size: 12px;
+      padding: 6px 10px;
+    }
+    .thinking-dots::after {
+      content: "...";
+      animation: thinkingAnim 1.6s steps(4, end) infinite;
+    }
+    @keyframes thinkingAnim {
+      0%, 20% { content: ""; }
+      40% { content: "."; }
+      60% { content: ".."; }
+      80%, 100% { content: "..."; }
+    }
     .tool-badge {
       display: inline-flex;
       align-items: center;
-      gap: 4px;
+      gap: 5px;
       padding: 3px 8px;
       background: var(--vscode-badge-background);
       color: var(--vscode-badge-foreground);
       border-radius: 4px;
       font-size: 11px;
+      margin: 2px 0;
+      font-family: var(--vscode-editor-font-family, monospace);
+      max-width: 90%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .code-block {
+      background: var(--vscode-textCodeBlock-background);
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 4px;
+      padding: 8px 10px;
+      margin: 8px 0;
+      overflow-x: auto;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 11.5px;
+      white-space: pre;
+    }
+    .inline-code {
+      background: var(--vscode-textCodeBlock-background);
+      border-radius: 3px;
+      padding: 1px 4px;
+      font-family: var(--vscode-editor-font-family, monospace);
+      font-size: 11.5px;
+    }
+    .md-h2, .md-h3, .md-h4 {
+      margin: 8px 0 4px 0;
+      font-weight: 600;
+    }
+    .md-h2 { font-size: 14px; }
+    .md-h3 { font-size: 13px; }
+    .md-h4 { font-size: 12.5px; }
+    .md-ul {
       margin: 4px 0;
-      font-family: var(--vscode-editor-font-family);
+      padding-left: 18px;
+    }
+    .md-li {
+      margin: 2px 0;
+    }
+    .spacer {
+      height: 8px;
     }
     #input-container {
       padding: 10px 12px;
@@ -427,6 +482,37 @@ class CodeAgentChatViewProvider {
 
     let currentAgentMsg = null;
 
+    function escapeHtml(str) {
+      return String(str)
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#039;");
+    }
+
+    function renderMarkdown(el, text) {
+      if (!text) {
+        el.innerHTML = "";
+        return;
+      }
+      let safe = escapeHtml(text);
+      safe = safe.replace(/\`\`\`([\\s\\S]*?)\`\`\`/g, function(_, code) {
+        return '<pre class="code-block"><code>' + code.trim() + '</code></pre>';
+      });
+      safe = safe.replace(/\`([^\`]+)\`/g, '<code class="inline-code">$1</code>');
+      safe = safe.replace(/\\*\\*([^*]+)\\*\\*/g, '<strong>$1</strong>');
+      safe = safe.replace(/\\*([^*]+)\\*/g, '<em>$1</em>');
+      safe = safe.replace(/^### ([^\\n]+)/gm, '<h4 class="md-h4">$1</h4>');
+      safe = safe.replace(/^## ([^\\n]+)/gm, '<h3 class="md-h3">$1</h3>');
+      safe = safe.replace(/^# ([^\\n]+)/gm, '<h2 class="md-h2">$1</h2>');
+      safe = safe.replace(/^[*-] ([^\\n]+)/gm, '<li class="md-li">$1</li>');
+      safe = safe.replace(/(<li class="md-li">[^]*?<\\/li>)/g, '<ul class="md-ul">$1</ul>');
+      safe = safe.replace(/\\n\\n+/g, '<div class="spacer"></div>');
+      safe = safe.replace(/\\n/g, '<br>');
+      el.innerHTML = safe;
+    }
+
     function scrollToBottom() {
       messagesDiv.scrollTop = messagesDiv.scrollHeight;
     }
@@ -435,6 +521,7 @@ class CodeAgentChatViewProvider {
       const text = input.value.trim();
       if (!text) return;
       input.value = "";
+      currentAgentMsg = null;
       vscode.postMessage({ type: "runTask", prompt: text });
     });
 
@@ -445,6 +532,7 @@ class CodeAgentChatViewProvider {
     clearBtn.addEventListener("click", () => {
       messagesDiv.innerHTML = '<div class="msg agent">Hello! I am CodeAgent. Ask me to fix a bug, refactor code, write tests, or build new features.</div>';
       statsSpan.textContent = "Ready";
+      currentAgentMsg = null;
     });
 
     input.addEventListener("keydown", (e) => {
@@ -470,7 +558,8 @@ class CodeAgentChatViewProvider {
         }
         case "agentStart": {
           currentAgentMsg = document.createElement("div");
-          currentAgentMsg.className = "msg agent";
+          currentAgentMsg.className = "msg agent thinking";
+          currentAgentMsg.innerHTML = '<span class="thinking-text">Thinking<span class="thinking-dots"></span></span>';
           messagesDiv.appendChild(currentAgentMsg);
           scrollToBottom();
           break;
@@ -481,16 +570,30 @@ class CodeAgentChatViewProvider {
             currentAgentMsg.className = "msg agent";
             messagesDiv.appendChild(currentAgentMsg);
           }
-          currentAgentMsg.textContent += msg.text;
+          if (currentAgentMsg.classList.contains("thinking")) {
+            currentAgentMsg.classList.remove("thinking");
+            currentAgentMsg.rawText = "";
+          }
+          currentAgentMsg.rawText = (currentAgentMsg.rawText || "") + msg.text;
+          renderMarkdown(currentAgentMsg, currentAgentMsg.rawText);
           scrollToBottom();
           break;
         }
         case "toolStart": {
+          if (currentAgentMsg && currentAgentMsg.classList.contains("thinking")) {
+            currentAgentMsg.remove();
+            currentAgentMsg = null;
+          }
           const badge = document.createElement("div");
           badge.className = "tool-badge";
-          badge.textContent = "⚙ " + msg.name;
+          let extra = "";
+          if (msg.args && typeof msg.args === "object") {
+            const vals = Object.values(msg.args).filter(v => typeof v === "string" && v.length < 80);
+            if (vals.length > 0) extra = " · " + vals[0];
+          }
+          badge.textContent = "⚙ " + msg.name + extra;
+          badge.title = JSON.stringify(msg.args || {}, null, 2);
           messagesDiv.appendChild(badge);
-          currentAgentMsg = null;
           scrollToBottom();
           break;
         }
@@ -503,6 +606,24 @@ class CodeAgentChatViewProvider {
           cancelBtn.style.display = "none";
           sendBtn.disabled = false;
           statsSpan.textContent = "Finished: " + (msg.result?.stopReason || "ok");
+          const finalMsg = msg.result?.finalMessage;
+          if (currentAgentMsg) {
+            if (currentAgentMsg.classList.contains("thinking")) {
+              currentAgentMsg.classList.remove("thinking");
+              if (finalMsg) {
+                renderMarkdown(currentAgentMsg, finalMsg);
+              } else {
+                currentAgentMsg.remove();
+              }
+            } else if (finalMsg) {
+              renderMarkdown(currentAgentMsg, finalMsg);
+            }
+          } else if (finalMsg) {
+            const div = document.createElement("div");
+            div.className = "msg agent";
+            renderMarkdown(div, finalMsg);
+            messagesDiv.appendChild(div);
+          }
           currentAgentMsg = null;
           scrollToBottom();
           break;
@@ -511,6 +632,9 @@ class CodeAgentChatViewProvider {
           cancelBtn.style.display = "none";
           sendBtn.disabled = false;
           statsSpan.textContent = "Error occurred";
+          if (currentAgentMsg && currentAgentMsg.classList.contains("thinking")) {
+            currentAgentMsg.remove();
+          }
           const errDiv = document.createElement("div");
           errDiv.className = "msg agent";
           errDiv.style.color = "var(--vscode-errorForeground)";
