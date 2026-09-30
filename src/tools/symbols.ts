@@ -33,6 +33,10 @@ export async function viewSymbolOutline(repoRoot: string, filePath: string): Pro
   const symbols: SymbolEntry[] = [];
 
   const isPython = ext === ".py";
+  const isGo = ext === ".go";
+  const isRust = ext === ".rs";
+  const isJava = ext === ".java" || ext === ".kt" || ext === ".cs" || ext === ".swift" || ext === ".php" || ext === ".rb";
+  const isC = ext === ".c" || ext === ".cpp" || ext === ".h" || ext === ".hpp";
 
   for (let i = 0; i < lines.length; i++) {
     const rawLine = lines[i];
@@ -54,6 +58,35 @@ export async function viewSymbolOutline(repoRoot: string, filePath: string): Pro
           signature: trimmed.replace(/:$/, ""),
           indent: leadingSpaces,
         });
+      }
+      continue;
+    }
+
+    if (isGo) {
+      const goMatch = trimmed.match(/^(func)\s+(?:\([^)]*\)\s+)?([A-Za-z0-9_]+)\s*\(/) ?? trimmed.match(/^type\s+([A-Za-z0-9_]+)\s+(struct|interface)/);
+      if (goMatch) {
+        const name = goMatch[2] ?? goMatch[1]!;
+        symbols.push({ line: i + 1, kind: name === goMatch[1] && /struct|interface/.test(trimmed) ? "class" : "function", name, signature: trimmed.replace(/\s*\{.*$/, ""), indent: leadingSpaces });
+      }
+      continue;
+    }
+
+    if (isRust) {
+      const rsMatch = trimmed.match(/^(pub\s+)?(fn|struct|enum|trait|impl)\s+([A-Za-z0-9_]+)/);
+      if (rsMatch) {
+        const kind = rsMatch[2] === "fn" ? "function" : "class";
+        symbols.push({ line: i + 1, kind, name: rsMatch[3]!, signature: trimmed.replace(/\s*\{.*$/, ""), indent: leadingSpaces });
+      }
+      continue;
+    }
+
+    if (isJava || isC) {
+      const jMatch = trimmed.match(/^(?:(?:public|private|protected|static|final|async|override|virtual)\s+)*(class|interface|enum|struct)\s+([A-Za-z0-9_]+)/)
+        ?? trimmed.match(/^(?:(?:public|private|protected|static|final|async)\s+)*[\w<>\[\]]+\s+([A-Za-z0-9_]+)\s*\([^;]*\)\s*(?:\{|;|$)/);
+      if (jMatch) {
+        const isType = /class|interface|enum|struct/.test(jMatch[1] ?? "");
+        const name = isType ? jMatch[2]! : jMatch[1]!;
+        symbols.push({ line: i + 1, kind: isType ? "class" : "method", name, signature: trimmed.replace(/\s*\{.*$/, "").slice(0, 160), indent: leadingSpaces });
       }
       continue;
     }

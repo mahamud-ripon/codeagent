@@ -129,6 +129,55 @@ export class DockerCommandRunner implements CommandRunner {
 let activeRunner: CommandRunner = new DevLocalCommandRunner();
 let currentSandboxMode: "local" | "docker" = "local";
 
+export interface SandboxConfig {
+  mode?: "local" | "docker";
+  image?: string;
+  network?: boolean;
+  mounts?: string[];
+}
+
+/** SF-7: persistent per-session container (docker create/start/exec). */
+const persistentContainers = new Map<string, string>();
+
+export function sandboxConfigFromSettings(settings: { sandbox?: SandboxConfig }): SandboxConfig {
+  return {
+    mode: settings.sandbox?.mode ?? "local",
+    image: settings.sandbox?.image ?? process.env.SANDBOX_IMAGE ?? "node:20-slim",
+    network: settings.sandbox?.network ?? true,
+    mounts: settings.sandbox?.mounts ?? [],
+  };
+}
+
+export async function ensurePersistentContainer(sessionId: string, config: SandboxConfig): Promise<string | null> {
+  if (config.mode !== "docker") return null;
+  const existing = persistentContainers.get(sessionId);
+  if (existing) return existing;
+  try {
+    const image = config.image ?? "node:20-slim";
+    const name = `codeagent-${sessionId.replace(/[^a-z0-9_-]/gi, "").slice(0, 32)}`;
+    const args = ["create", "--name", name, "-i", "-w", "/workspace"];
+    if (config.network === false) args.push("--network=none");
+    args.push(image, "sleep", "infinity");
+    await execFileAsync("docker", args, { timeout: 30_000 });
+    await execFileAsync("docker", ["start", name], { timeout: 15_000 });
+    persistentContainers.set(sessionId, name);
+    return name;
+  } catch {
+    return null;
+  }
+}
+
+export async function removePersistentContainer(sessionId: string): Promise<void> {
+  const name = persistentContainers.get(sessionId);
+  if (!name) return;
+  persistentContainers.delete(sessionId);
+  try {
+    await execFileAsync("docker", ["rm", "-f", name], { timeout: 15_000 });
+  } catch {
+    // best effort
+  }
+}
+
 export function getActiveCommandRunner(): CommandRunner {
   return activeRunner;
 }

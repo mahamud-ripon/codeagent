@@ -29,8 +29,7 @@ describe("PermissionManager", () => {
     expect(await pm.checkCommand("npm test")).toBe(true);
     expect(await pm.checkCommand("npm test --watch")).toBe(true);
     expect(await pm.checkCommand("tsc --noEmit")).toBe(true);
-    // Disallowed:
-    expect(await pm.checkCommand("rm -rf dist")).toBe(true); // without handler, fallback is true
+    expect(await pm.checkCommand("rm -rf dist")).toBe(false);
   });
 
   it("invokes handler when command is not in allowlist", async () => {

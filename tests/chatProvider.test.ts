@@ -5,12 +5,14 @@ import {
   type MinimalChatClient,
 } from "../src/llm/chatProvider.js";
 import { createProviderFromEnv } from "../src/llm/provider.js";
-import { toChatTools } from "../src/llm/tools.js";
+import { tools, toChatTools } from "../src/llm/tools.js";
 
 describe("toChatTools", () => {
-  it("converts all 14 tools to chat shape", () => {
+  it("converts every tool to chat shape", () => {
     const chat = toChatTools();
-    expect(chat).toHaveLength(14);
+    expect(chat).toHaveLength(tools.length);
+    expect(chat.some((t) => t.function.name === "grep")).toBe(true);
+    expect(chat.some((t) => t.function.name === "multi_edit")).toBe(true);
     expect(chat[0]).toMatchObject({
       type: "function",
       function: { name: "list_files" },
@@ -120,6 +122,22 @@ describe("createChatResponder", () => {
     expect(result.output_text).toBe("Here is the fix");
     expect(result.reasoning_text).toContain("DeepSeek model thoughts");
     expect(result.reasoning_text).toContain("Plan the fix");
+  });
+
+  it("assembles a streaming chat completion", async () => {
+    async function* chunks() {
+      yield { choices: [{ delta: { content: "Hel" } }] };
+      yield { choices: [{ delta: { content: "lo" } }] };
+      yield { choices: [{ delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 2, completion_tokens: 1 } };
+    }
+    const client: MinimalChatClient = {
+      chat: { completions: { create: async () => chunks() } },
+    };
+    const respond = createChatResponder(client, { model: "m", systemPrompt: "SYS" });
+    const result = await respond([{ role: "user", content: "hi" }]);
+    expect(result.output_text).toBe("Hello");
+    expect(result.finish_reason).toBe("stop");
+    expect(result.usage).toMatchObject({ input: 2, output: 1 });
   });
 });
 

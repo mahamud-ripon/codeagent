@@ -42,7 +42,7 @@ describe("agent loop", () => {
       return { output: [], output_text: "## Summary\nFixed add().\n" };
     };
 
-    const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 10, responder, verbose: false });
+    const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 10, responder, verbose: false, autoApprove: true });
     const result = await agent.run("Fix add()");
     expect(result.finalMessage).toContain("Fixed add()");
     expect(result.modifiedFiles).toContain("math.ts");
@@ -79,7 +79,9 @@ describe("agent loop", () => {
       output_text: "",
     });
     const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 20, responder, verbose: false });
-    await expect(agent.run("loop forever")).rejects.toThrow(/repeating|exceeded/i);
+    const result = await agent.run("loop forever");
+    expect(result.stopReason).toBe("stuck");
+    expect(result.finalMessage).toMatch(/Stuck: repeated/i);
   });
 
   it("backs off on rate limits without polluting history", async () => {
@@ -183,16 +185,18 @@ describe("agent loop", () => {
       if (turn === 2) {
         // Second turn first call should contain the first turn's history
         expect(input.length).toBeGreaterThan(2);
+        return { output: [fc("c1", "read_file", { path: "math.ts" })], output_text: "" };
+      }
+      if (turn === 3) {
         return {
-          output: [fc("c1", "edit_file", { path: "math.ts", old_text: "return a - b;", new_text: "return a + b;" })],
+          output: [fc("c2", "edit_file", { path: "math.ts", old_text: "return a - b;", new_text: "return a + b;" })],
           output_text: "",
         };
       }
-      // Finish turn 2
       return { output: [], output_text: "Fixed." };
     };
 
-    const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 10, responder, verbose: false });
+    const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 10, responder, verbose: false, autoApprove: true });
     const firstResult = await agent.run("hello");
     expect(firstResult.intent).toBe("conversational");
 

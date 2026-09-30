@@ -12,6 +12,29 @@
 export interface PatchResult {
   updated: string;
   strategy: "exact" | "crlf_normalized" | "trimmed_lines" | "fuzzy_similarity" | "unified_diff";
+  replacements?: number;
+  /** Shown when a fuzzy match is the only candidate, so a wrong region is visible. */
+  diffPreview?: string;
+}
+
+export interface PatchOptions {
+  replaceAll?: boolean;
+}
+
+function renderRegionDiff(before: string[], after: string[], startLine: number): string {
+  const lines: string[] = [];
+  const max = Math.max(before.length, after.length);
+  for (let i = 0; i < max; i++) {
+    const oldLine = before[i];
+    const newLine = after[i];
+    if (oldLine === newLine) {
+      if (oldLine !== undefined) lines.push(` ${startLine + i}| ${oldLine}`);
+    } else {
+      if (oldLine !== undefined) lines.push(`-${startLine + i}| ${oldLine}`);
+      if (newLine !== undefined) lines.push(`+${startLine + i}| ${newLine}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 /** Compute Dice's coefficient (bigram similarity) between two strings in [0, 1]. */
@@ -223,10 +246,12 @@ export function applyMultiStrategyPatch(
   oldText: string,
   newText: string,
   filePath?: string,
+  options?: PatchOptions,
 ): PatchResult {
   if (!oldText && !isUnifiedDiff(newText)) {
     throw new Error("old_text must be non-empty");
   }
+  const replaceAll = options?.replaceAll ?? false;
 
   const isCRLF = content.includes("\r\n");
 
@@ -241,10 +266,10 @@ export function applyMultiStrategyPatch(
 
   // Strategy 1: Exact substring match
   const occurrences = content.split(oldText).length - 1;
-  if (occurrences === 1) {
-    const updated = content.replace(oldText, newText);
+  if (occurrences === 1 || (replaceAll && occurrences > 1)) {
+    const updated = replaceAll ? content.split(oldText).join(newText) : content.replace(oldText, newText);
     validateSyntaxPreFlight(updated, filePath);
-    return { updated, strategy: "exact" };
+    return { updated, strategy: "exact", replacements: occurrences };
   }
   if (occurrences > 1) {
     throw new Error(
@@ -258,11 +283,11 @@ export function applyMultiStrategyPatch(
   const normNew = newText.replace(/\r\n/g, "\n");
   const normOccurrences = normContent.split(normOld).length - 1;
 
-  if (normOccurrences === 1) {
-    const updatedNorm = normContent.replace(normOld, normNew);
+  if (normOccurrences === 1 || (replaceAll && normOccurrences > 1)) {
+    const updatedNorm = replaceAll ? normContent.split(normOld).join(normNew) : normContent.replace(normOld, normNew);
     const updated = isCRLF ? updatedNorm.replace(/\n/g, "\r\n") : updatedNorm;
     validateSyntaxPreFlight(updated, filePath);
-    return { updated, strategy: "crlf_normalized" };
+    return { updated, strategy: "crlf_normalized", replacements: normOccurrences };
   }
   if (normOccurrences > 1) {
     throw new Error(
@@ -289,7 +314,7 @@ export function applyMultiStrategyPatch(
       }
     }
 
-    if (matchingIndices.length === 1) {
+    if (matchingIndices.length === 1 || (replaceAll && matchingIndices.length > 1)) {
       const startIdx = matchingIndices[0];
       const newLines = normNew.split("\n");
 
@@ -321,11 +346,14 @@ export function applyMultiStrategyPatch(
         return indentStr + line.trimStart();
       });
 
-      contentLines.splice(startIdx, oldLines.length, ...adaptedNewLines);
+      const indices = replaceAll ? [...matchingIndices].sort((a, b) => b - a) : [startIdx];
+      for (const idx of indices) {
+        contentLines.splice(idx, oldLines.length, ...adaptedNewLines);
+      }
       const updatedNorm = contentLines.join("\n");
       const updated = isCRLF ? updatedNorm.replace(/\n/g, "\r\n") : updatedNorm;
       validateSyntaxPreFlight(updated, filePath);
-      return { updated, strategy: "trimmed_lines" };
+      return { updated, strategy: "trimmed_lines", replacements: indices.length };
     }
     if (matchingIndices.length > 1) {
       throw new Error(
@@ -334,37 +362,37 @@ export function applyMultiStrategyPatch(
     }
   }
 
-  // Strategy 4: Fuzzy Sliding Window Match (Dice similarity on multiline block)
-  if (oldLines.length >= 2 && oldLines.length <= contentLines.length) {
-    let bestScore = 0;
-    let bestIdx = -1;
-    let secondBestScore = 0;
-
+  // Strategy 4: Fuzzy match only when a single window clears 0.88.
+  if (!replaceAll && oldLines.length >= 2 && oldLines.length <= contentLines.length) {
     const oldJoined = oldLines.map((l) => l.trim()).join("\n");
+    const candidates: Array<{ idx: number; score: number; lines: string[] }> = [];
 
     for (let i = 0; i <= contentLines.length - oldLines.length; i++) {
       const candidateLines = contentLines.slice(i, i + oldLines.length);
       const candidateJoined = candidateLines.map((l) => l.trim()).join("\n");
       const score = stringSimilarity(candidateJoined, oldJoined);
-
-      if (score > bestScore) {
-        secondBestScore = bestScore;
-        bestScore = score;
-        bestIdx = i;
-      } else if (score > secondBestScore) {
-        secondBestScore = score;
-      }
+      if (score >= 0.88) candidates.push({ idx: i, score, lines: candidateLines });
     }
 
-    // High confidence fuzzy match (>= 88% similarity) with a clear margin over any second best
-    if (bestScore >= 0.88 && (bestScore - secondBestScore >= 0.15 || secondBestScore < 0.60)) {
-      const startIdx = bestIdx;
+    if (candidates.length > 1) {
+      throw new Error(
+        `old_text fuzzy-matched ${candidates.length} regions (>= 0.88). Provide a longer snippet so the edit is unambiguous.`,
+      );
+    }
+
+    if (candidates.length === 1) {
+      const startIdx = candidates[0]!.idx;
+      const before = candidates[0]!.lines;
       const newLines = normNew.split("\n");
       contentLines.splice(startIdx, oldLines.length, ...newLines);
       const updatedNorm = contentLines.join("\n");
       const updated = isCRLF ? updatedNorm.replace(/\n/g, "\r\n") : updatedNorm;
       validateSyntaxPreFlight(updated, filePath);
-      return { updated, strategy: "fuzzy_similarity" };
+      return {
+        updated,
+        strategy: "fuzzy_similarity",
+        diffPreview: renderRegionDiff(before, newLines, startIdx + 1),
+      };
     }
   }
 

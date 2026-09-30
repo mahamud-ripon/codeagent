@@ -12,6 +12,17 @@ export class CheckpointManager {
 
   constructor(private repoRoot: string) {}
 
+  /** Restore a persisted index (SS-1): git refs are the source of truth for code. */
+  setCheckpoints(records: CheckpointRecord[]): void {
+    this.checkpoints = records
+      .filter((r) => r && typeof r.id === "string")
+      .map((r) => ({ ...r }));
+  }
+
+  setRepoRoot(repoRoot: string): void {
+    this.repoRoot = repoRoot;
+  }
+
   /**
    * Captures an ephemeral shadow snapshot of the repository state.
    */

@@ -25,12 +25,18 @@ export interface ToolExecutionResult {
 
 const CONCURRENCY_SAFE_TOOLS = new Set([
   "list_files",
+  "read",
   "read_file",
   "view_file",
   "search",
+  "grep",
+  "glob",
   "view_symbol_outline",
   "git_status",
   "git_diff",
+  "git_log",
+  "web_fetch",
+  "web_search",
 ]);
 
 export function isConcurrencySafeTool(name: string): boolean {

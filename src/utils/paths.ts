@@ -1,3 +1,4 @@
+import fs from "node:fs/promises";
 import path from "node:path";
 
 /**
@@ -23,4 +24,36 @@ export function resolveInsideRepo(
   }
 
   return resolved;
+}
+
+/**
+ * Follow the nearest existing ancestor and reject a symlink that leaves the repo.
+ * Missing files are allowed so write_file can create them.
+ */
+export async function assertRealpathInsideRepo(repoRoot: string, absolute: string): Promise<void> {
+  const root = path.resolve(repoRoot);
+  let realRoot = root;
+  try {
+    realRoot = await fs.realpath(root);
+  } catch {
+    // The root itself may not exist in tests that only resolve paths.
+  }
+
+  let cursor = absolute;
+  for (let i = 0; i < 64; i++) {
+    try {
+      const real = await fs.realpath(cursor);
+      if (real !== realRoot && !real.startsWith(realRoot + path.sep)) {
+        throw new Error(`Path escapes repository via symlink: ${absolute}`);
+      }
+      return;
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("Path escapes")) throw error;
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") return;
+      const parent = path.dirname(cursor);
+      if (parent === cursor) return;
+      cursor = parent;
+    }
+  }
 }

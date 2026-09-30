@@ -1,5 +1,5 @@
 import { buildRepoMap } from "../repo/scanner.js";
-import { formatRulesForContext, type LoadedRule } from "./rules.js";
+import { formatMemoryForContext, formatRulesForContext, type LoadedRule } from "./rules.js";
 
 function environmentBlock(): string {
   const platform = process.platform; // win32 | darwin | linux
@@ -26,7 +26,11 @@ function environmentBlock(): string {
  * repo map + scripts + phase-0 guidance + project rules. Everything else is
  * retrieved progressively via tools (never dump the whole repo).
  */
-export async function buildInitialContext(repoRoot: string, rules: LoadedRule[] = []): Promise<string> {
+export async function buildInitialContext(
+  repoRoot: string,
+  rules: LoadedRule[] = [],
+  memory: LoadedRule[] = [],
+): Promise<string> {
   const map = await buildRepoMap(repoRoot);
   const lines = [
     "<repository>",
@@ -38,6 +42,11 @@ export async function buildInitialContext(repoRoot: string, rules: LoadedRule[] 
     "",
     "Follow the EXPLORE -> IMPLEMENT -> VERIFY -> REVIEW workflow from the system prompt.",
   ];
+
+  if (memory.length > 0) {
+    lines.push("");
+    lines.push(formatMemoryForContext(memory));
+  }
 
   if (rules.length > 0) {
     lines.push("");

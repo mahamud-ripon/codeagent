@@ -1,10 +1,13 @@
 {
   "name": "codeagent",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "CLI-first autonomous coding agent",
   "type": "module",
   "bin": {
     "codeagent": "dist/index.js"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "scripts": {
     "dev": "tsx src/index.ts",
@@ -12,7 +15,8 @@
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "eval": "tsx eval/run.ts"
   },
   "dependencies": {
     "@clack/prompts": "^1.8.1",

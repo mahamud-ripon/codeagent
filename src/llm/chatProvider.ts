@@ -1,6 +1,8 @@
 import type OpenAI from "openai";
 import { toChatTools } from "./tools.js";
 import type { ResponsesCreateResult, Responder, ResponderOptions } from "./client.js";
+import { collectProviderEvents, streamChatChunks, type ChatStreamChunk } from "./stream.js";
+import { withProviderRetry } from "./retry.js";
 
 /**
  * Chat Completions provider — the free-model route.
@@ -23,23 +25,32 @@ export interface MinimalChatClient {
         model: string;
         messages: ChatMessage[];
         tools?: ChatTool[];
-      }): Promise<{
-        choices: Array<{
-          message: {
-            content?: string | null;
-            reasoning_content?: string | null;
-            reasoning?: string | null;
-            thought?: string | null;
-            tool_calls?: Array<{
-              id: string;
-              type?: string;
-              function: { name: string; arguments: string };
+        stream?: boolean;
+      }): Promise<
+        | {
+            choices: Array<{
+              message: {
+                content?: string | null;
+                reasoning_content?: string | null;
+                reasoning?: string | null;
+                thought?: string | null;
+                tool_calls?: Array<{
+                  id: string;
+                  type?: string;
+                  function: { name: string; arguments: string };
+                }>;
+              };
+              finish_reason?: string | null;
             }>;
-          };
-        }>;
-      }>;
+          }
+        | AsyncIterable<ChatStreamChunk>
+      >;
     };
   };
+}
+
+function isAsyncIterable(value: unknown): value is AsyncIterable<ChatStreamChunk> {
+  return typeof value === "object" && value !== null && Symbol.asyncIterator in value;
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -214,12 +225,19 @@ export function createChatResponder(
     ];
 
     const useTools = options?.tools ?? true;
-    const completion = await client.chat.completions.create({
-      model: args.model,
-      messages,
-      ...(useTools ? { tools: toChatTools() as unknown as ChatTool[] } : {}),
-    });
+    const created = await withProviderRetry(() =>
+      client.chat.completions.create({
+        model: args.model,
+        messages,
+        stream: true,
+        ...(useTools ? { tools: toChatTools() as unknown as ChatTool[] } : {}),
+      }),
+    );
+    if (isAsyncIterable(created)) {
+      return collectProviderEvents(streamChatChunks(created));
+    }
 
+    const completion = created;
     const choice = completion.choices[0];
     const msg = choice?.message;
     if (!msg) throw new Error("Chat provider returned no choices.");

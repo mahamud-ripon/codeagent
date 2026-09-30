@@ -1,9 +1,14 @@
 import OpenAI from "openai";
 import { createOpenAIClient, createResponder, type Responder } from "./client.js";
 import { createChatResponder, type MinimalChatClient } from "./chatProvider.js";
+import { providerToResponder } from "./stream.js";
+import { createStreamingProvider } from "./streamingProvider.js";
 import { SYSTEM_PROMPT } from "../agent/prompt.js";
 
-export type ProviderKind = "openai-responses" | "openai-chat";
+export type ProviderKind = "openai-responses" | "openai-chat" | "anthropic" | "gemini";
+
+/** Single source of truth for the default model id (overridable via $MODEL). */
+export const DEFAULT_MODEL = "gpt-5.6-luna";
 
 export interface ProviderInfo {
   kind: ProviderKind;
@@ -40,14 +45,22 @@ export interface ProviderOverrides {
 /**
  * Pure selection logic — never touches the network or API keys, so the
  * REPL banner and /status can render before any key is configured.
+ * Native kinds: LLM_PROVIDER=anthropic|gemini select native adapters (ML-1).
  */
 export function describeProviderFromEnv(
   env: NodeJS.ProcessEnv = process.env,
   overrides?: ProviderOverrides,
 ): ProviderInfo & { needsKey: boolean } {
-  const model = overrides?.model ?? env.MODEL ?? "gpt-5.6-luna";
+  const model = overrides?.model ?? env.MODEL ?? DEFAULT_MODEL;
   const baseURL = (overrides?.baseURL ?? env.OPENAI_BASE_URL?.trim()) || undefined;
   const explicit = (overrides?.provider ?? env.LLM_PROVIDER ?? "").trim().toLowerCase();
+
+  if (explicit === "anthropic") {
+    return { kind: "anthropic", model, needsKey: !env.ANTHROPIC_API_KEY };
+  }
+  if (explicit === "gemini") {
+    return { kind: "gemini", model, needsKey: !env.GEMINI_API_KEY && !env.GOOGLE_API_KEY };
+  }
 
   const useChat =
     explicit === "chat" ||
@@ -76,6 +89,27 @@ export function createProviderFromEnv(
       responder: createResponder(client, { model: described.model, instructions: SYSTEM_PROMPT }),
       info: { kind: described.kind, model: described.model },
     };
+  }
+
+  if (described.kind === "anthropic" || described.kind === "gemini") {
+    // Native adapters stream via fetch; the Responder shim below preserves the
+    // legacy non-streaming call shape until the loop migrates fully (ML-1).
+    // Until a key is configured, return a fail-closed responder that throws
+    // MissingApiKeyError instead of hitting the network.
+    const key = described.kind === "anthropic"
+      ? env.ANTHROPIC_API_KEY
+      : (env.GEMINI_API_KEY ?? env.GOOGLE_API_KEY);
+    if (!key) {
+      const missing = (): Promise<never> => { throw new MissingApiKeyError(); };
+      return { responder: missing, info: { kind: described.kind, model: described.model } };
+    }
+    const provider = createStreamingProvider({
+      kind: described.kind,
+      model: described.model,
+      apiKey: key,
+      systemPrompt: SYSTEM_PROMPT,
+    });
+    return { responder: providerToResponder(provider, SYSTEM_PROMPT), info: { kind: described.kind, model: described.model } };
   }
 
   const client = new OpenAI({

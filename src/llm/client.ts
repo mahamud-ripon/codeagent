@@ -1,4 +1,6 @@
 import OpenAI from "openai";
+import { mapResponsesApiResult } from "./responsesMap.js";
+import { withProviderRetry } from "./retry.js";
 
 /**
  * Thin wrapper: env validation + client construction.
@@ -26,14 +28,25 @@ export interface ResponsesCreateResult {
     call_id?: string;
     name?: string;
     arguments?: string;
-    /** Assistant text for provider-returned message items. */
-    content?: string;
+    /** Assistant text, or the original content payload for reasoning items. */
+    content?: unknown;
+    role?: string;
+    id?: string;
+    summary?: unknown;
+    encrypted_content?: string;
+    status?: string;
   }>;
   output_text: string;
   /** Extracted thinking / reasoning text from models that support it. */
   reasoning_text?: string;
   /** Provider finish reason (e.g., 'stop', 'length', 'tool_calls'). */
   finish_reason?: string;
+  usage?: {
+    input: number;
+    output: number;
+    cachedInput?: number;
+    costUsd?: number;
+  };
 }
 
 export interface ResponderOptions {
@@ -49,22 +62,26 @@ export function createResponder(
   return async (input: unknown[], options?: ResponderOptions) => {
     const { tools } = await import("./tools.js");
     const useTools = options?.tools ?? true;
-    const response = await client.responses.create({
-      model: args.model,
-      instructions: args.instructions,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      tools: useTools ? (tools as any) : undefined,
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      input: input as any,
-    });
-    return {
-      output: response.output.map((item) => ({
-        type: (item as { type: string }).type,
-        call_id: (item as { call_id?: string }).call_id,
-        name: (item as { name?: string }).name,
-        arguments: (item as { arguments?: string }).arguments,
-      })),
+    const response = await withProviderRetry(() =>
+      client.responses.create({
+        model: args.model,
+        instructions: args.instructions,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        tools: useTools ? (tools as any) : undefined,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        input: input as any,
+      }),
+    );
+    return mapResponsesApiResult({
+      output: response.output as unknown as Array<Record<string, unknown>>,
       output_text: response.output_text,
-    };
+      status: (response as { status?: string }).status,
+      incomplete_details: (response as { incomplete_details?: { reason?: string } | null }).incomplete_details,
+      usage: (response as { usage?: {
+        input_tokens?: number;
+        output_tokens?: number;
+        input_tokens_details?: { cached_tokens?: number };
+      } }).usage,
+    });
   };
 }

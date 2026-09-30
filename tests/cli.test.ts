@@ -99,7 +99,7 @@ describe("parseArgs", () => {
       throw new Error("exit");
     }) as never);
     expect(() => parseArgs(["-p", "invalid"])).toThrow("exit");
-    expect(exit).toHaveBeenCalledWith(1);
+    expect(exit).toHaveBeenCalledWith(4);
   });
 
   it("rejects invalid sandbox values", () => {
@@ -107,7 +107,7 @@ describe("parseArgs", () => {
       throw new Error("exit");
     }) as never);
     expect(() => parseArgs(["-s", "remote"])).toThrow("exit");
-    expect(exit).toHaveBeenCalledWith(1);
+    expect(exit).toHaveBeenCalledWith(4);
   });
 
   it("rejects non-positive iteration counts", () => {
@@ -116,6 +116,6 @@ describe("parseArgs", () => {
     }) as never);
     expect(() => parseArgs(["-i", "0"])).toThrow("exit");
     expect(() => parseArgs(["--max-iterations=abc"])).toThrow("exit");
-    expect(exit).toHaveBeenCalledWith(1);
+    expect(exit).toHaveBeenCalledWith(4);
   });
 });

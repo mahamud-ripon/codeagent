@@ -5,7 +5,12 @@ import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { Agent } from "./agent/agent.js";
+import { PermissionManager } from "./agent/permissions.js";
+import { loadPermissionSettings } from "./agent/settings.js";
+import { exitCodeForStopReason, parseOutputFormat, renderJsonResult, type OutputFormat } from "./cli/headless.js";
+import type { AgentEvent } from "./llm/events.js";
 import { createProviderFromEnv } from "./llm/provider.js";
+import { DEFAULT_MODEL } from "./llm/provider.js";
 import { ensureEndpointForKey, loadGlobalEnv } from "./cli/config.js";
 import { startRepl } from "./cli/repl.js";
 import { setSandboxMode } from "./tools/sandbox.js";
@@ -23,6 +28,7 @@ loadGlobalEnv();
  */
 
 function printHelp(): void {
+  const defaultModel = process.env.MODEL ?? DEFAULT_MODEL;
   console.log(`codeagent — autonomous coding agent
 
 Usage:
@@ -31,19 +37,28 @@ Usage:
 
 Options:
   --repo <path>           Repository root (default: cwd)
-  -m, --model <id>        Model (default: $MODEL or gpt-5.6-luna)
+  -m, --model <id>        Model (default: $MODEL or ${defaultModel})
   -p, --provider <name>   LLM backend: openai (Responses) or chat (Completions)
   -e, --endpoint <url>    OpenAI-compatible base URL (implies chat provider)
   -i, --iterations <n>    Max agent iterations (alias of --max-iterations)
   --max-iterations <n>    Max agent iterations (default: $MAX_ITERATIONS or 30)
   -s, --sandbox <mode>    Command execution: docker or local (default: local)
-  -y, --auto              Auto mode: auto-approve shell commands without prompt
+  -y, --auto              Bypass permission prompts for this run
+  --dangerously-skip-permissions
+                          Same as --auto. Required for unattended edits.
+  --allowedTools <rules>  Comma-separated allow rules, e.g. Bash(npm test:*),Edit(src/**)
+  --print                 Headless: run one task and print the result
+  --output-format <fmt>   text (default), json, or stream-json
+  --ui <mode>             Terminal UI: legacy (default) or next (streaming)
+  --acp                   Start the ACP stdio bridge (IDE integration)
+  mcp <add|list|remove>   Manage MCP servers (see /mcp in REPL)
   -r, --resume [id]       Resume latest session (or specified session ID / index)
+  -c, --continue [id]       Alias for --resume (continue where you left off)
   --sessions              List saved sessions for this repository and exit
   -h, --help              Show this help
 
 REPL slash commands:
-  /help /status /sessions /session /resume /new /undo /revert /checkpoints
+  /help /status /sessions /session /resume /new /undo /rewind /export /revert /checkpoints
   /repo /model /provider /endpoint /key /sandbox /iterations /plan /todos
   /tasks /mode /auto /manual /worktree /thought /t /diff /compact /clear /exit /quit
 
@@ -63,26 +78,40 @@ export interface CliArgs {
   task: string;
   repo: string;
   model?: string;
-  provider?: "openai" | "chat";
+  provider?: "openai" | "chat" | "anthropic" | "gemini";
   baseURL?: string;
   maxIterations: number;
   sandbox?: "docker" | "local";
   resume?: string | boolean;
   showSessions?: boolean;
   autoApprove?: boolean;
+  dangerouslySkipPermissions?: boolean;
+  allowedTools?: string[];
+  printMode?: boolean;
+  outputFormat?: OutputFormat;
+  ui?: "legacy" | "next";
+  acp?: boolean;
+  mcpArgs?: string[];
 }
 
 export function parseArgs(argv: string[]): CliArgs {
   const rest: string[] = [];
   let repo = process.cwd();
   let model: string | undefined;
-  let provider: "openai" | "chat" | undefined;
+  let provider: "openai" | "chat" | "anthropic" | "gemini" | undefined;
   let baseURL: string | undefined;
   let maxIterations = Number(process.env.MAX_ITERATIONS ?? 30);
   let sandbox: "docker" | "local" | undefined;
   let resume: string | boolean | undefined;
   let showSessions = false;
   let autoApprove = false;
+  let dangerouslySkipPermissions = false;
+  const allowedTools: string[] = [];
+  let printMode = false;
+  let outputFormat: OutputFormat = "text";
+  let ui: "legacy" | "next" | undefined;
+  let acp = false;
+  let mcpArgs: string[] | undefined;
 
   let i = 0;
   // Consumes the next argv token as the current flag's value, if present.
@@ -107,9 +136,9 @@ export function parseArgs(argv: string[]): CliArgs {
     } else if (a.startsWith("--model=") || a.startsWith("-m=")) {
       model = a.slice(a.indexOf("=") + 1);
     } else if (a === "-p" || a === "--provider") {
-      provider = nextValue() as "openai" | "chat" | undefined ?? provider;
+      provider = nextValue() as "openai" | "chat" | "anthropic" | "gemini" | undefined ?? provider;
     } else if (a.startsWith("--provider=") || a.startsWith("-p=")) {
-      provider = a.slice(a.indexOf("=") + 1) as "openai" | "chat";
+      provider = a.slice(a.indexOf("=") + 1) as "openai" | "chat" | "anthropic" | "gemini";
     } else if (a === "-e" || a === "--endpoint") {
       baseURL = nextValue() ?? baseURL;
     } else if (a.startsWith("--endpoint=") || a.startsWith("-e=")) {
@@ -123,11 +152,34 @@ export function parseArgs(argv: string[]): CliArgs {
       sandbox = nextValue() as "docker" | "local" | undefined ?? sandbox;
     } else if (a.startsWith("--sandbox=") || a.startsWith("-s=")) {
       sandbox = a.slice(a.indexOf("=") + 1) as "docker" | "local";
-    } else if (a === "-y" || a === "--yes" || a === "--auto" || a === "--auto-approve") {
+    } else if (a === "-y" || a === "--yes" || a === "--auto" || a === "--auto-approve" || a === "--dangerously-skip-permissions") {
       autoApprove = true;
+      dangerouslySkipPermissions = a === "--dangerously-skip-permissions" || dangerouslySkipPermissions;
+    } else if (a === "--allowedTools") {
+      const value = nextValue();
+      if (value) allowedTools.push(...value.split(",").map((part) => part.trim()).filter(Boolean));
+    } else if (a.startsWith("--allowedTools=")) {
+      allowedTools.push(...a.slice("--allowedTools=".length).split(",").map((part) => part.trim()).filter(Boolean));
+    } else if (a === "--print") {
+      printMode = true;
+    } else if (a === "--output-format") {
+      outputFormat = parseOutputFormat(nextValue());
+    } else if (a.startsWith("--output-format=")) {
+      outputFormat = parseOutputFormat(a.slice("--output-format=".length));
+    } else if (a === "--ui") {
+      const v = nextValue();
+      if (v === "next" || v === "legacy") ui = v;
+    } else if (a.startsWith("--ui=")) {
+      const v = a.slice("--ui=".length);
+      if (v === "next" || v === "legacy") ui = v;
+    } else if (a === "--acp") {
+      acp = true;
+    } else if (a === "mcp") {
+      mcpArgs = argv.slice(i + 1);
+      break;
     } else if (a === "--sessions") {
       showSessions = true;
-    } else if (a === "-r" || a === "--resume") {
+    } else if (a === "-r" || a === "--resume" || a === "-c" || a === "--continue") {
       if (i + 1 < argv.length && !argv[i + 1].startsWith("-")) {
         resume = argv[++i];
       } else {
@@ -135,6 +187,8 @@ export function parseArgs(argv: string[]): CliArgs {
       }
     } else if (a.startsWith("--resume=")) {
       resume = a.slice("--resume=".length);
+    } else if (a.startsWith("--continue=")) {
+      resume = a.slice("--continue=".length);
     } else {
       rest.push(a);
     }
@@ -142,25 +196,46 @@ export function parseArgs(argv: string[]): CliArgs {
 
   if (!Number.isFinite(maxIterations) || maxIterations < 1) {
     console.error("Error: --max-iterations must be a positive number.");
-    process.exit(1);
+    process.exit(4);
   }
-  if (provider !== undefined && provider !== "openai" && provider !== "chat") {
-    console.error("Error: --provider must be 'openai' or 'chat'.");
-    process.exit(1);
+  if (provider !== undefined && provider !== "openai" && provider !== "chat" && provider !== "anthropic" && provider !== "gemini") {
+    console.error("Error: --provider must be 'openai', 'chat', 'anthropic', or 'gemini'.");
+    process.exit(4);
   }
   if (sandbox !== undefined && sandbox !== "docker" && sandbox !== "local") {
     console.error("Error: --sandbox must be 'docker' or 'local'.");
-    process.exit(1);
+    process.exit(4);
   }
 
-  return { task: rest.join(" ").trim(), repo, model, provider, baseURL, maxIterations, sandbox, resume, showSessions, autoApprove };
+  return {
+    task: rest.join(" ").trim(),
+    repo,
+    model,
+    provider,
+    baseURL,
+    maxIterations,
+    sandbox,
+    resume,
+    showSessions,
+    autoApprove,
+    dangerouslySkipPermissions,
+    allowedTools,
+    printMode,
+    outputFormat,
+    ui,
+    acp,
+    mcpArgs,
+  };
 }
 
 interface OneShotOptions {
   model?: string;
-  provider?: "openai" | "chat";
+  provider?: "openai" | "chat" | "anthropic" | "gemini";
   baseURL?: string;
   maxIterations: number;
+  autoApprove?: boolean;
+  allowedTools?: string[];
+  outputFormat?: OutputFormat;
 }
 
 async function runOneShot(
@@ -180,12 +255,15 @@ async function runOneShot(
     provider: opts.provider,
     baseURL: opts.baseURL,
   });
-  console.log("");
-  console.log(`  ${pc.bold("Workspace:")}  ${pc.white(repoRoot)}`);
-  console.log(`  ${pc.bold("Model:")}      ${pc.yellow(info.model)}${info.baseURL ? pc.dim(` (${info.baseURL})`) : ""}`);
-  console.log(`  ${pc.bold("Task:")}       ${pc.cyan(task)}`);
-  console.log(pc.dim("  Tip: Ctrl+C cancels a running task."));
-  console.log("");
+  const quiet = opts.outputFormat === "json" || opts.outputFormat === "stream-json";
+  if (!quiet) {
+    console.log("");
+    console.log(`  ${pc.bold("Workspace:")}  ${pc.white(repoRoot)}`);
+    console.log(`  ${pc.bold("Model:")}      ${pc.yellow(info.model)}${info.baseURL ? pc.dim(` (${info.baseURL})`) : ""}`);
+    console.log(`  ${pc.bold("Task:")}       ${pc.cyan(task)}`);
+    console.log(pc.dim("  Tip: Ctrl+C cancels a running task."));
+    console.log("");
+  }
 
   const controller = new AbortController();
   process.on("SIGINT", () => {
@@ -193,12 +271,49 @@ async function runOneShot(
     controller.abort();
   });
 
-  const reporter = new ConsoleAgentReporter(repoRoot);
-  const agent = new Agent({ repoRoot, model: info.model, maxIterations: opts.maxIterations, responder, reporter });
+  const settings = loadPermissionSettings(repoRoot);
+  const bypass = opts.autoApprove === true;
+  const permissions = new PermissionManager({
+    autoApprove: bypass,
+    mode: bypass ? "bypass" : settings.mode ?? "default",
+    allow: [...settings.allow, ...(opts.allowedTools ?? [])],
+    deny: settings.deny,
+    ask: settings.ask,
+  });
+  const reporter = quiet ? undefined : new ConsoleAgentReporter(repoRoot);
+  const onEvent = opts.outputFormat === "stream-json"
+    ? (event: AgentEvent) => {
+        if ("respond" in event) return;
+        console.log(JSON.stringify(event));
+      }
+    : undefined;
+  const agent = new Agent({
+    repoRoot,
+    model: info.model,
+    maxIterations: opts.maxIterations,
+    responder,
+    reporter,
+    permissions,
+    provider: opts.provider,
+    baseURL: opts.baseURL,
+    autoApprove: bypass,
+    onEvent,
+  });
   try {
     const startedAt = Date.now();
     const result = await agent.run(task, { signal: controller.signal });
     const tookSeconds = (Date.now() - startedAt) / 1000;
+    if (opts.outputFormat === "json" || opts.outputFormat === "stream-json") {
+      console.log(renderJsonResult({
+        ok: result.stopReason !== "permission" && result.stopReason !== "budget" && result.stopReason !== "error" && result.stopReason !== "stuck",
+        stopReason: result.stopReason ?? "ok",
+        finalMessage: result.finalMessage,
+        iterations: result.iterations,
+        modifiedFiles: result.modifiedFiles,
+        usage: result.usage,
+      }));
+      process.exit(exitCodeForStopReason(result.stopReason));
+    }
     console.log("");
     console.log(formatMarkdown(result.finalMessage));
     console.log("");
@@ -215,20 +330,41 @@ async function runOneShot(
     console.log(pc.dim("─".repeat(50)));
     console.log(`  ${stats.join(" · ")}`);
     console.log("");
+    const code = exitCodeForStopReason(result.stopReason);
+    if (code !== 0) process.exit(code);
   } catch (error) {
-    reporter.stop();
+    reporter?.stop();
     if (controller.signal.aborted) {
       console.error(pc.yellow("\nRun cancelled."));
       process.exit(130);
     }
     console.error(pc.red(`\nAgent failed: ${error instanceof Error ? error.message : error}`));
-    process.exit(1);
+    process.exit(exitCodeForStopReason("error"));
   }
+}
+
+async function readStdin(): Promise<string> {
+  if (process.stdin.isTTY) return "";
+  const chunks: Buffer[] = [];
+  for await (const chunk of process.stdin) chunks.push(Buffer.from(chunk));
+  return Buffer.concat(chunks).toString("utf8").trim();
 }
 
 async function main(): Promise<void> {
   const args = parseArgs(process.argv.slice(2));
   const repoRoot = path.resolve(args.repo);
+
+  if (args.acp) {
+    const { startAcpServer } = await import("./integrations/acp.js");
+    await startAcpServer(repoRoot);
+    return;
+  }
+
+  if (args.mcpArgs) {
+    const { runMcpCli } = await import("./cli/mcpCli.js");
+    await runMcpCli(args.mcpArgs, repoRoot);
+    return;
+  }
 
   if (args.showSessions) {
     const list = listSessions(repoRoot);
@@ -249,6 +385,10 @@ async function main(): Promise<void> {
   if (args.sandbox) {
     const res = await setSandboxMode(args.sandbox);
     console.log(res.success ? pc.green(`  ✔ ${res.message}`) : pc.yellow(`  ⚠ ${res.message}`));
+  }
+
+  if (args.printMode && !args.task) {
+    args.task = await readStdin();
   }
 
   if (!args.task) {
@@ -282,6 +422,7 @@ async function main(): Promise<void> {
       maxIterations: args.maxIterations,
       activeSession,
       autoApprove: args.autoApprove,
+      ui: args.ui,
     });
     return;
   }
@@ -291,6 +432,9 @@ async function main(): Promise<void> {
     provider: args.provider,
     baseURL: args.baseURL,
     maxIterations: args.maxIterations,
+    autoApprove: args.autoApprove,
+    allowedTools: args.allowedTools,
+    outputFormat: args.printMode ? args.outputFormat ?? "text" : args.outputFormat,
   });
 }
 

@@ -1,24 +1,39 @@
 import { executeTool } from "../tools/index.js";
 import type { Responder } from "../llm/client.js";
-import { createProviderFromEnv } from "../llm/provider.js";
+import { createProviderFromEnv, type ProviderOverrides } from "../llm/provider.js";
 import { truncate } from "../utils/truncate.js";
 
-export type SubagentType = "explore" | "plan";
+export type SubagentType = "explore" | "plan" | (string & {});
 
 export interface SubagentOptions {
   maxIterations?: number;
   responder?: Responder;
   signal?: AbortSignal;
-  subagentType?: SubagentType;
+  subagentType?: string;
+  /** Inherited from the parent run (--model, --provider, --endpoint). */
+  providerOverrides?: ProviderOverrides;
+  /** Test hook. Production uses createProviderFromEnv with the inherited overrides. */
+  createResponder?: (overrides?: ProviderOverrides) => Responder;
+  /** Custom system prompt (user-defined subagents, AG-12). */
+  systemPrompt?: string;
+  /** Allowed tools override (user-defined subagents). */
+  allowedTools?: string[];
+  /** Repo root for registry lookup of custom defs. */
+  repoRoot?: string;
 }
 
-const ALLOWED_SUBAGENT_TOOLS = new Set([
+const BASE_ALLOWED_SUBAGENT_TOOLS = new Set([
   "list_files",
+  "read",
   "read_file",
   "view_file",
   "search",
+  "grep",
+  "glob",
   "view_symbol_outline",
 ]);
+
+const ALLOWED_SUBAGENT_TOOLS = BASE_ALLOWED_SUBAGENT_TOOLS;
 
 const EXPLORE_SYSTEM_PROMPT = `You are an Explorer Subagent for Codeagent. Your mission is to explore, search, and analyze the repository to answer the given research task.
 
@@ -37,6 +52,22 @@ RULES:
 
 ### Next Actions for Main Agent
 <recommended modifications or files to touch>
+`;
+
+const REVIEWER_SYSTEM_PROMPT = `You are a Reviewer Subagent for Codeagent. Read the provided diff/context and report issues only.
+RULES:
+1. You have READ-ONLY tools: list_files, read, read_file, view_file, search, grep, glob, view_symbol_outline.
+2. You CANNOT modify files, write code, or run shell commands.
+3. Reply in this format:
+
+### Issues
+<blocking issues with file:line>
+
+### Nits
+<non-blocking>
+
+### Verdict
+<approve | request-changes>
 `;
 
 const PLAN_SYSTEM_PROMPT = `You are a Software Architect and Planning Subagent for Codeagent. Your mission is to explore the codebase and design an implementation plan.
@@ -69,13 +100,30 @@ export async function runSubagent(
   task: string,
   options?: SubagentOptions,
 ): Promise<string> {
-  const maxIterations = options?.maxIterations ?? 5;
+  const envCap = Number(process.env.SUBAGENT_MAX_ITERATIONS ?? 0);
+  const maxIterations = options?.maxIterations
+    ?? (Number.isFinite(envCap) && envCap > 0 ? Math.min(20, Math.floor(envCap)) : 5);
   const signal = options?.signal;
   const subagentType = options?.subagentType ?? "explore";
-  const systemPrompt = subagentType === "plan" ? PLAN_SYSTEM_PROMPT : EXPLORE_SYSTEM_PROMPT;
+  let systemPrompt = options?.systemPrompt
+    ?? (subagentType === "plan" ? PLAN_SYSTEM_PROMPT : subagentType === "reviewer" ? REVIEWER_SYSTEM_PROMPT : EXPLORE_SYSTEM_PROMPT);
+  // User-defined subagents (AG-12): resolve Markdown defs by name when no explicit prompt given.
+  if (!options?.systemPrompt && subagentType !== "explore" && subagentType !== "plan" && subagentType !== "reviewer") {
+    try {
+      const { loadSubagentDefs } = await import("./subagentsRegistry.js");
+      const defs = await loadSubagentDefs(options?.repoRoot ?? repoRoot);
+      const def = defs.find((d) => d.name === subagentType);
+      if (def?.systemPrompt) systemPrompt = def.systemPrompt;
+    } catch {
+      // fall back to explorer prompt
+    }
+  }
+  const allowed = options?.allowedTools ? new Set(options.allowedTools) : ALLOWED_SUBAGENT_TOOLS;
   const responder =
     options?.responder ??
-    createProviderFromEnv(process.env).responder;
+    (options?.createResponder
+      ? options.createResponder(options.providerOverrides)
+      : createProviderFromEnv(process.env, options?.providerOverrides).responder);
 
   const history: unknown[] = [
     { role: "system", content: systemPrompt },
@@ -104,6 +152,13 @@ export async function runSubagent(
 
       if (!ALLOWED_SUBAGENT_TOOLS.has(name)) {
         const errorMsg = `TOOL ERROR (${name}): Subagents only have read-only permissions. Cannot call '${name}'.`;
+        history.push({ type: "function_call_output", call_id: callId, output: errorMsg });
+        continue;
+      }
+
+      // When a custom allowed-tools set is active, enforce it (AG-12).
+      if (allowed !== ALLOWED_SUBAGENT_TOOLS && !allowed.has(name)) {
+        const errorMsg = `TOOL ERROR (${name}): Subagent '${subagentType}' cannot call '${name}'.`;
         history.push({ type: "function_call_output", call_id: callId, output: errorMsg });
         continue;
       }
@@ -146,4 +201,31 @@ export async function runSubagent(
   } catch {
     return "[SUBAGENT RESEARCH COMPLETE]\nExploration completed across inspected files.\n\n[DIRECTIVE FOR MAIN AGENT]: Present findings to the user now.";
   }
+}
+
+/**
+ * AG-12: bounded parallel subagent runs (default concurrency 3).
+ * Results preserve input order; failures become TOOL ERROR strings.
+ */
+export async function runSubagentsParallel(
+  repoRoot: string,
+  tasks: Array<{ task: string; subagentType?: string }>,
+  options?: SubagentOptions & { concurrency?: number },
+): Promise<string[]> {
+  const concurrency = Math.max(1, Math.min(5, options?.concurrency ?? 3));
+  const results: string[] = new Array(tasks.length);
+  let next = 0;
+  async function worker(): Promise<void> {
+    while (next < tasks.length) {
+      const idx = next++;
+      const t = tasks[idx]!;
+      try {
+        results[idx] = await runSubagent(repoRoot, t.task, { ...options, subagentType: t.subagentType ?? options?.subagentType });
+      } catch (e) {
+        results[idx] = `TOOL ERROR (run_subagent): ${e instanceof Error ? e.message : String(e)}`;
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker()));
+  return results;
 }

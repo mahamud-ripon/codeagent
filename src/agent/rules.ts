@@ -70,10 +70,176 @@ function detectProjectLanguages(repoRoot: string): Set<string> {
  * Searches candidate rule directories for Markdown rule files matching active categories.
  * Prioritizes language-specific rules over generic common rules, capping at maxRules (default 5).
  */
+const MEMORY_FILES = ["AGENTS.md", "CODEAGENT.md", "CLAUDE.md"];
+const RULE_CHAR_BUDGET = 24_000;
+
+export function applyCharBudget(rules: LoadedRule[], budget = RULE_CHAR_BUDGET): LoadedRule[] {
+  const kept: LoadedRule[] = [];
+  let used = 0;
+  for (const rule of rules) {
+    if (kept.length > 0 && used + rule.content.length > budget) break;
+    kept.push(rule);
+    used += rule.content.length;
+  }
+  return kept;
+}
+
+/**
+ * Load AGENTS.md, CODEAGENT.md, and CLAUDE.md from the repo, its parents, and ~/.codeagent/.
+ * Memory files are separate from the language rule packs.
+ */
+export function loadProjectMemory(repoRoot: string, homeDir: string = os.homedir()): LoadedRule[] {
+  const found: LoadedRule[] = [];
+  const seen = new Set<string>();
+  const remember = (full: string, name: string) => {
+    if (seen.has(full) || !fs.existsSync(full)) return;
+    seen.add(full);
+    try {
+      found.push({ filePath: full, category: "memory", name, content: fs.readFileSync(full, "utf8") });
+    } catch {
+      // skip unreadable memory files
+    }
+  };
+
+  let dir = path.resolve(repoRoot);
+  const root = path.parse(dir).root;
+  for (let i = 0; i < 32; i++) {
+    for (const name of MEMORY_FILES) remember(path.join(dir, name), name);
+    if (dir === root) break;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  remember(path.join(homeDir, ".codeagent", "CODEAGENT.md"), "CODEAGENT.md");
+  return applyCharBudget(found, 16_000);
+}
+
+export function formatMemoryForContext(rules: LoadedRule[]): string {
+  if (rules.length === 0) return "";
+  const sections = rules.map((rule) => `<file path="${rule.filePath}">\n${rule.content.trim()}\n</file>`);
+  return ["<project_memory>", ...sections, "</project_memory>"].join("\n");
+}
+
+/**
+ * Resolve the project memory file for `#` notes and `/init` (AG-8):
+ * prefer an existing AGENTS.md, then CODEAGENT.md, then CLAUDE.md;
+ * otherwise a new AGENTS.md at the repo root.
+ */
+export function resolveMemoryFile(repoRoot: string): string {
+  const root = path.resolve(repoRoot);
+  for (const name of MEMORY_FILES) {
+    const full = path.join(root, name);
+    try {
+      if (fs.existsSync(full) && fs.statSync(full).isFile()) return full;
+    } catch {
+      // try the next candidate
+    }
+  }
+  return path.join(root, "AGENTS.md");
+}
+
+/**
+ * Append a `#` shortcut note to the project memory file, creating it with
+ * a header when missing. Returns the file path written.
+ */
+export function appendMemoryNote(repoRoot: string, note: string): string {
+  const text = note.trim();
+  if (!text) throw new Error("Cannot append an empty memory note.");
+  const file = resolveMemoryFile(repoRoot);
+  let existing = "";
+  try {
+    existing = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+  } catch {
+    existing = "";
+  }
+  const header = "# Project memory\n\nNotes below were added via `#` in codeagent.\n";
+  const body = existing.trim() ? `${existing.replace(/\s+$/, "")}\n` : header;
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, `${body}\n- ${text.replace(/\n+/g, " ")}\n`, "utf8");
+  return file;
+}
+
+function detectTestCommand(repoRoot: string): string | null {
+  try {
+    const pkgFile = path.join(path.resolve(repoRoot), "package.json");
+    if (fs.existsSync(pkgFile)) {
+      const pkg = JSON.parse(fs.readFileSync(pkgFile, "utf8")) as { scripts?: Record<string, string> };
+      if (pkg.scripts?.test) return "npm test";
+      if (pkg.scripts?.build) return "npm run build";
+      return "npm install";
+    }
+  } catch {
+    // fall through the checklist
+  }
+  const markers: Array<[string, string]> = [
+    ["pyproject.toml", "pytest"],
+    ["requirements.txt", "pytest"],
+    ["go.mod", "go test ./..."],
+    ["Cargo.toml", "cargo test"],
+    ["Makefile", "make test"],
+  ];
+  for (const [marker, command] of markers) {
+    try {
+      if (fs.existsSync(path.join(path.resolve(repoRoot), marker))) return command;
+    } catch {
+      // ignore
+    }
+  }
+  return null;
+}
+
+/**
+ * Generate the project memory file (`/init`, AG-8): scans languages,
+ * layout, and test commands, then writes a starter AGENTS.md. Never
+ * overwrites an existing memory file — returns it with created: false.
+ */
+export function generateMemoryFile(repoRoot: string): { file: string; created: boolean } {
+  const root = path.resolve(repoRoot);
+  const existing = MEMORY_FILES.map((name) => path.join(root, name)).find((full) => {
+    try {
+      return fs.existsSync(full) && fs.statSync(full).isFile();
+    } catch {
+      return false;
+    }
+  });
+  if (existing) return { file: existing, created: false };
+
+  const languages = [...detectProjectLanguages(root)].sort();
+  const testCommand = detectTestCommand(root);
+  let topLevel: string[] = [];
+  try {
+    topLevel = fs.readdirSync(root).filter((entry) => !entry.startsWith(".")).slice(0, 20);
+  } catch {
+    topLevel = [];
+  }
+  const lines = [
+    "# Project memory",
+    "",
+    "Generated by codeagent `/init`. Edit freely — this file is loaded into every session.",
+    "",
+    "## Project",
+    `- Languages/stack: ${languages.length > 0 ? languages.join(", ") : "(not detected)"}`,
+    `- Top-level layout: ${topLevel.length > 0 ? topLevel.join(", ") : "(empty)"}`,
+    `- Verify changes with: ${testCommand ?? "(no test command detected)"}`,
+    "",
+    "## Conventions",
+    "- Keep edits minimal and scoped to the task.",
+    "- Read a file before editing it; never guess contents.",
+    "- Run the verify command after changing code.",
+    "",
+    "## Notes",
+    "<!-- Add durable project facts below via `# your note` in the REPL. -->",
+    "",
+  ];
+  const file = path.join(root, "AGENTS.md");
+  fs.writeFileSync(file, lines.join("\n"), "utf8");
+  return { file, created: true };
+}
+
 export function discoverRules(
   repoRoot: string,
   homeDir: string = os.homedir(),
-  maxRules: number = 5,
+  maxRules: number = 40,
 ): LoadedRule[] {
   const activeCategories = detectProjectLanguages(repoRoot);
   const candidateRoots: string[] = [
@@ -159,7 +325,7 @@ export function discoverRules(
     loadedRules.push(fallback);
   }
 
-  return loadedRules.slice(0, maxRules);
+  return applyCharBudget(loadedRules.slice(0, maxRules));
 }
 
 /**

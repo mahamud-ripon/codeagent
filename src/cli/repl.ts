@@ -9,7 +9,7 @@ import {
   MissingApiKeyError,
   type ProviderOverrides,
 } from "../llm/provider.js";
-import { gitDiff, gitStatus } from "../tools/git.js";
+import { gitDiff, gitStatus, restoreShadowCheckpoint } from "../tools/git.js";
 import { deleteEnvKey, ensureEndpointForKey, globalEnvPath, upsertEnvKey } from "./config.js";
 
 // Re-exported for existing callers/tests; canonical home is ./config.js.
@@ -22,16 +22,28 @@ export { detectEndpointForKey } from "./config.js";
  */
 
 import { PermissionManager } from "../agent/permissions.js";
-import { compactHistory } from "../agent/compactor.js";
+import { loadModelSettings, loadPermissionSettings } from "../agent/settings.js";
+import { compactHistory, compactHistoryWithSummary } from "../agent/compactor.js";
+import { logAudit } from "../agent/audit.js";
+import { appendMemoryNote, generateMemoryFile } from "../agent/rules.js";
 import { CheckpointManager } from "../agent/checkpoint.js";
 import { getSandboxMode, setSandboxMode } from "../tools/sandbox.js";
 import {
+  appendSessionTurn,
   createSession,
+  defaultExportFilename,
   deleteSession,
+  deriveTitle,
+  dropTurnsFrom,
+  exportSessionMarkdown,
   formatTimeAgo,
   listSessions,
   loadSession,
+  resolveRewindTarget,
+  rewriteSessionHistory,
   saveSession,
+  truncateHistoryForRewind,
+  type RewindScope,
   type SessionRecord,
 } from "../session/sessionManager.js";
 import {
@@ -40,6 +52,8 @@ import {
   formatMarkdown,
   formatDiff,
   promptPermission,
+  promptPlanApproval,
+  promptRewindSelect,
   promptSessionSelect,
   printUserMessage,
   formatThoughtLine,
@@ -50,6 +64,8 @@ import {
   pc,
   icons,
 } from "./ui/index.js";
+import { estimateCostUsd, getModelCapabilities } from "../llm/capabilities.js";
+import type { Responder } from "../llm/client.js";
 import { TodoManager } from "../agent/todo.js";
 import { PlanModeManager } from "../agent/planMode.js";
 import { FileStateCache } from "../tools/fileStateCache.js";
@@ -81,6 +97,15 @@ export interface SessionConfig {
   sessionHome?: string;
   /** Whether commands are auto-approved without confirmation (Auto Mode). */
   autoApprove?: boolean;
+  /** Cumulative token/cost usage for this REPL session (powers /cost). */
+  usage?: { input: number; output: number; costUsd: number };
+  /** UI selector (UI-1…UI-13): legacy readline (default) or next streaming UI. */
+  ui?: "legacy" | "next";
+  /**
+   * Plan-mode approver (AG-9): shows exit_plan_mode plans and requires
+   * accept / edit / reject. A returned string is the user-revised plan.
+   */
+  planApprover?: (plan: string) => Promise<boolean | string>;
 }
 
 
@@ -220,6 +245,8 @@ function printHelp(): void {
     ${pc.cyan("/session save [title]")}   Rename or checkpoint the current session
     ${pc.cyan("/session delete <n|id>")}  Delete a saved session from disk
     ${pc.cyan("/undo, /revert")}          Revert workspace files to state before last task run
+    ${pc.cyan("/rewind [n] [scope]")}     Restore code, conversation, or both to an earlier turn
+    ${pc.cyan("/export [file]")}          Export this session to Markdown
     ${pc.cyan("/checkpoints")}            List recorded turn checkpoints
     ${pc.cyan("/repo <path>")}            Switch workspace repository root
 
@@ -240,7 +267,10 @@ function printHelp(): void {
   ${pc.bold(pc.cyan("Context & Code Inspection:"))}
     ${pc.cyan("/thought [on|off]")}       Toggle thinking display (Ctrl+O, alias: /t)
     ${pc.cyan("/diff")}                   Show colorized git diff
-    ${pc.cyan("/compact")}                Compact conversation memory to reduce token usage
+    ${pc.cyan("/compact [focus]")}        Compact conversation memory to reduce token usage
+    ${pc.cyan("/cost")}                   Show session token and cost totals
+    ${pc.cyan("/init")}                   Generate the project memory file (AGENTS.md)
+    ${pc.cyan("# note")}                  Append a note to the project memory file
     ${pc.cyan("/status")}                 Show repo / provider / model / session settings
     ${pc.cyan("/clear")}                  Clear the screen and reset session conversation memory
     ${pc.cyan("/help")}                   Show this help menu
@@ -252,6 +282,7 @@ function printStatus(session: SessionConfig): void {
   const info = describeProviderFromEnv(process.env, sessionOverrides(session));
   const turnCount = session.history && session.history.length > 0 ? Math.floor(session.history.length / 2) : 0;
   const isAuto = session.permissions?.isAutoApprove() ?? session.autoApprove ?? false;
+  const roles = loadModelSettings(session.repoRoot);
   console.log(`
   ${pc.bold(pc.cyan("Session Status"))}
   ${pc.dim("─".repeat(45))}
@@ -262,14 +293,60 @@ function printStatus(session: SessionConfig): void {
   ${pc.bold("Execution Mode:")} ${isAuto ? pc.green("auto (auto-approves commands)") : pc.cyan("manual (prompts for confirmation)")}
   ${pc.bold("Todo Tasks:")}    ${session.todoManager && session.todoManager.getTodos().length > 0 ? `${session.todoManager.getTodos().length} tasks (${session.todoManager.getTodos().filter((t) => t.status === "completed").length} completed)` : pc.dim("none")}
   ${pc.bold("Provider:")}      ${pc.magenta(info.kind)}${info.baseURL ? pc.dim(` (${info.baseURL})`) : ""}
-  ${pc.bold("Model:")}         ${pc.yellow(info.model)}
+  ${pc.bold("Model:")}         ${pc.yellow(info.model)}${roles.fast ? pc.dim(` (fast: ${roles.fast}${roles.plan ? `, plan: ${roles.plan}` : ""})`) : ""}
   ${pc.bold("Max Iter:")}      ${pc.white(String(session.maxIterations))}
   ${pc.bold("API Key:")}       ${info.needsKey ? pc.yellow("missing — run /key <api-key>") : pc.green("configured")}
   ${pc.bold("Context Memory:")} ${turnCount > 0 ? pc.green(`${turnCount} turn(s) in context`) : pc.dim("empty")}
 `);
 }
 
-async function runTask(session: SessionConfig, task: string, signal: AbortSignal): Promise<void> {
+function formatUsd(value: number): string {
+  return value < 0.01 ? `$${value.toFixed(4)}` : `$${value.toFixed(2)}`;
+}
+
+/** Session token/cost totals for /cost (ML-6). */
+export function printCost(session: SessionConfig): void {
+  const info = describeProviderFromEnv(process.env, sessionOverrides(session));
+  const usage = session.usage ?? { input: 0, output: 0, costUsd: 0 };
+  const caps = getModelCapabilities(info.model);
+  const priced = caps.inputPricePerMtok !== undefined && caps.outputPricePerMtok !== undefined;
+  console.log(`
+  ${pc.bold(pc.cyan("Session Cost"))}
+  ${pc.dim("─".repeat(45))}
+  ${pc.bold("Model:")}         ${pc.yellow(info.model)}
+  ${pc.bold("Input tokens:")}  ${pc.white(usage.input.toLocaleString())}
+  ${pc.bold("Output tokens:")} ${pc.white(usage.output.toLocaleString())}
+  ${pc.bold("Cost:")}          ${priced ? pc.green(formatUsd(usage.costUsd)) : pc.dim(`${formatUsd(usage.costUsd)} (price unknown for this model)`)}
+  ${pc.bold("Budgets:")}       ${pc.dim("set per-run caps with --max-iterations; token/cost budgets stop the loop (stopReason: budget)")}
+`);
+}
+
+/** SS-4: fast-model title with deterministic fallback. Never throws. */
+async function resolveAutoTitle(task: string, summarizer?: Responder): Promise<string> {
+  const fallback = deriveTitle(task);
+  if (!summarizer) return fallback;
+  try {
+    const res = await summarizer([
+      { role: "user", content: `Write a 2-6 word session title for this task. No quotes. Task: ${task.slice(0, 200)}` },
+    ]);
+    const t = (res.output_text ?? "")
+      .trim()
+      .split("\n")[0]
+      .replace(/^["'#\-*\s]+|["'\s]+$/g, "")
+      .trim()
+      .slice(0, 60);
+    return t || fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+async function runTask(
+  session: SessionConfig,
+  task: string,
+  signal: AbortSignal,
+  turn?: { historyStart: number; checkpointId?: string; checkpointHash?: string },
+): Promise<void> {
   // Heal keys saved before auto-detect existed (or pasted into .env by hand).
   for (const notice of ensureEndpointForKey({
     provider: session.provider,
@@ -294,6 +371,21 @@ async function runTask(session: SessionConfig, task: string, signal: AbortSignal
   session.planModeManager = session.planModeManager ?? new PlanModeManager();
   session.fileStateCache = session.fileStateCache ?? new FileStateCache();
 
+  // Model roles + capability overrides (ML-3/ML-5): the fast role backs
+  // LLM-written compaction summaries; window overrides rescale compaction.
+  const modelSettings = loadModelSettings(session.repoRoot);
+  let summarizer: Responder | undefined;
+  if (modelSettings.fast && modelSettings.fast !== info.model) {
+    try {
+      summarizer = createProviderFromEnv(process.env, {
+        ...sessionOverrides(session),
+        model: modelSettings.fast,
+      }).responder;
+    } catch {
+      summarizer = undefined;
+    }
+  }
+
   const isAuto = session.permissions?.isAutoApprove() ?? session.autoApprove ?? false;
   const reporter = new ConsoleAgentReporter(session.repoRoot, session.autoExpandThought, session.todoManager?.getTodos());
   reporter.setTodosExpanded(session.todosExpanded ?? true);
@@ -310,30 +402,99 @@ async function runTask(session: SessionConfig, task: string, signal: AbortSignal
     todoManager: session.todoManager,
     planModeManager: session.planModeManager,
     fileStateCache: session.fileStateCache,
+    provider: session.provider,
+    baseURL: session.baseURL,
+    autoApprove: session.autoApprove,
+    planApprover: session.planApprover,
+    summarizer,
+    capabilitiesOverride: modelSettings.capabilities,
   });
   try {
     const taskStartedAt = Date.now();
     const result = await agent.run(task, { signal, history: session.history });
     const tookSeconds = (Date.now() - taskStartedAt) / 1000;
+    if (result.usage) {
+      const total = session.usage ?? { input: 0, output: 0, costUsd: 0 };
+      // Fill cost gaps when the provider omitted usage but the price table knows the model.
+      let cost = result.usage.costUsd;
+      if (!cost) {
+        cost = estimateCostUsd(info.model, result.usage.input, result.usage.output) ?? 0;
+      }
+      session.usage = {
+        input: total.input + result.usage.input,
+        output: total.output + result.usage.output,
+        costUsd: total.costUsd + cost,
+      };
+    }
     if (result.history) {
       session.history = compactHistory(result.history);
     }
-    // Auto-save the active session on disk
+    // Auto-save the active session on disk (SS-1/SS-3/SS-4):
+    // per-turn checkpoint index + append-only JSONL turn + fast-model title.
     if (session.activeSession) {
-      session.activeSession.turnCount++;
-      session.activeSession.history = session.history ?? [];
-      if (session.activeSession.title === "New session" || !session.activeSession.title) {
-        session.activeSession.title = task.slice(0, 60);
-      }
-      for (const f of result.modifiedFiles) {
-        if (!session.activeSession.modifiedFiles.includes(f)) {
-          session.activeSession.modifiedFiles.push(f);
+      const beforeLen = turn?.historyStart ?? 0;
+      const afterHistory = session.history ?? [];
+      const needsTitle =
+        session.activeSession.title === "New session" || !session.activeSession.title;
+      const title = needsTitle ? await resolveAutoTitle(task, summarizer) : undefined;
+      if (title) session.activeSession.title = title;
+      const newFiles = result.modifiedFiles.filter(
+        (f) => !session.activeSession!.modifiedFiles.includes(f),
+      );
+      const checkpoint =
+        turn?.checkpointId
+          ? {
+              id: turn.checkpointId,
+              timestamp: Date.now(),
+              label: task.slice(0, 80),
+              commitHash: turn.checkpointHash ?? "",
+            }
+          : undefined;
+      if (afterHistory.length < beforeLen) {
+        // Compaction rewrote history: record a rewrite line so JSONL replay
+        // stays exact, then record the turn marker without duplicating text.
+        session.activeSession.history = afterHistory;
+        session.activeSession.turnCount++;
+        for (const f of result.modifiedFiles) {
+          if (!session.activeSession.modifiedFiles.includes(f)) {
+            session.activeSession.modifiedFiles.push(f);
+          }
         }
+        if (checkpoint && !session.activeSession.checkpoints?.some((c) => c.id === checkpoint.id)) {
+          session.activeSession.checkpoints = [...(session.activeSession.checkpoints ?? []), checkpoint];
+        }
+        session.activeSession.model = info.model;
+        session.activeSession.provider = session.provider;
+        session.activeSession.baseURL = session.baseURL;
+        rewriteSessionHistory(session.activeSession, afterHistory, session.sessionHome);
+        const snap = {
+          index: (session.activeSession.turns?.length ?? 0) + 1,
+          timestamp: new Date().toISOString(),
+          label: task.slice(0, 120),
+          historyStart: 0,
+          historyLength: afterHistory.length,
+          checkpointId: checkpoint?.id,
+        };
+        session.activeSession.turns = [...(session.activeSession.turns ?? []), snap];
+        saveSession(session.activeSession, session.sessionHome);
+      } else {
+        appendSessionTurn(
+          session.activeSession,
+          {
+            label: task.slice(0, 120),
+            historyAppend: afterHistory.slice(beforeLen),
+            historyStart: beforeLen,
+            checkpoint,
+            title,
+            modifiedFilesAppend: newFiles,
+            model: info.model,
+            provider: session.provider,
+            baseURL: session.baseURL,
+          },
+          session.sessionHome,
+        );
+        session.history = session.activeSession.history;
       }
-      session.activeSession.model = info.model;
-      session.activeSession.provider = session.provider;
-      session.activeSession.baseURL = session.baseURL;
-      saveSession(session.activeSession, session.sessionHome);
     }
 
     // Rich formatted assistant response
@@ -368,6 +529,74 @@ async function runTask(session: SessionConfig, task: string, signal: AbortSignal
   }
 }
 
+
+/**
+ * SS-2: rewind to a turn. Scope "code" restores files only, "conversation"
+ * truncates history only, "both" (default) does both. Exported for tests.
+ */
+export async function doRewind(
+  session: SessionConfig,
+  selector: string,
+  scope: RewindScope = "both",
+): Promise<{ ok: boolean; message: string }> {
+  const record = session.activeSession;
+  if (!record) return { ok: false, message: "No active session to rewind." };
+  const turns = record.turns ?? [];
+  if (turns.length === 0) return { ok: false, message: "No turns recorded yet — nothing to rewind." };
+  const target = resolveRewindTarget(turns, selector);
+  if (!target) return { ok: false, message: `No such turn: "${selector}". Use /rewind with no args to pick.` };
+
+  const wantCode = scope === "both" || scope === "code";
+  const wantConversation = scope === "both" || scope === "conversation";
+
+  if (wantCode) {
+    if (!target.checkpointId) {
+      return { ok: false, message: `Turn ${target.index} has no code checkpoint (non-git workspace?).` };
+    }
+    let restored = false;
+    if (session.checkpoints) {
+      restored = await session.checkpoints.restoreCheckpoint(target.checkpointId);
+    }
+    if (!restored) {
+      restored = await restoreShadowCheckpoint(session.repoRoot, target.checkpointId);
+    }
+    if (!restored) {
+      return { ok: false, message: `Checkpoint ${target.checkpointId} could not be restored.` };
+    }
+    // Sync the persisted checkpoint index with the manager state.
+    if (session.checkpoints) {
+      const remaining = session.checkpoints.listCheckpoints().map((c) => ({ ...c }));
+      record.checkpoints = remaining;
+    } else {
+      record.checkpoints = (record.checkpoints ?? []).filter(
+        (c) => (turns.findIndex((t) => t.checkpointId === c.id) < target.index - 1) || c.id === target.checkpointId,
+      );
+    }
+  }
+
+  if (wantConversation) {
+    const history = session.history ?? record.history ?? [];
+    session.history = truncateHistoryForRewind(history, target);
+    record.history = session.history;
+    record.turns = dropTurnsFrom(turns, target.index);
+    record.turnCount = record.turns.length;
+  } else {
+    // Code-only rewind still drops later turn markers so a second rewind
+    // cannot target code that no longer exists; history is untouched.
+    record.turns = dropTurnsFrom(turns, target.index);
+    record.turnCount = record.turns.length;
+  }
+
+  rewriteSessionHistory(record, record.history, session.sessionHome);
+  saveSession(record, session.sessionHome);
+  const parts: string[] = [];
+  if (wantCode) parts.push("code");
+  if (wantConversation) parts.push("conversation");
+  return {
+    ok: true,
+    message: `Rewound to turn ${target.index} ("${target.label.slice(0, 60)}") — restored ${parts.join(" + ")}.`,
+  };
+}
 
 export function handleSessionCommand(session: SessionConfig, subcmd: string, restArgs: string): void {
   const op = subcmd.toLowerCase();
@@ -412,6 +641,11 @@ export function handleSessionCommand(session: SessionConfig, subcmd: string, res
     }
     session.activeSession = loaded;
     session.history = loaded.history ?? [];
+    // Restore the persisted checkpoint index (SS-1) so /undo and /rewind
+    // survive restarts even though git refs were always persistent.
+    if (session.checkpoints?.setCheckpoints && loaded.checkpoints) {
+      session.checkpoints.setCheckpoints(loaded.checkpoints.map((c) => ({ ...c })));
+    }
     if (loaded.model) session.model = loaded.model;
     if (loaded.provider) session.provider = loaded.provider;
     if (loaded.baseURL) session.baseURL = loaded.baseURL;
@@ -431,6 +665,7 @@ export function handleSessionCommand(session: SessionConfig, subcmd: string, res
       baseURL: session.baseURL,
     });
     session.history = [];
+    if (session.checkpoints?.setCheckpoints) session.checkpoints.setCheckpoints([]);
     saveSession(session.activeSession, session.sessionHome);
     console.log(`Started new session ${c.cyan(session.activeSession.id)}: "${c.bold(session.activeSession.title)}".`);
     return;
@@ -515,6 +750,10 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
   if (!session.checkpoints) {
     session.checkpoints = new CheckpointManager(session.repoRoot);
   }
+  // Restore the persisted checkpoint index (SS-1) alongside history.
+  if (session.activeSession?.checkpoints && session.checkpoints.setCheckpoints) {
+    session.checkpoints.setCheckpoints(session.activeSession.checkpoints.map((c) => ({ ...c })));
+  }
   // Heal keys saved before auto-detect existed (or pasted into .env by hand).
   const startupNotices = ensureEndpointForKey({
     provider: session.provider,
@@ -547,19 +786,31 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
   loadHistory(rl);
 
   if (!session.permissions) {
+    const settings = loadPermissionSettings(session.repoRoot);
     session.permissions = new PermissionManager({
       autoApprove: session.autoApprove ?? false,
+      mode: session.autoApprove ? "bypass" : settings.mode,
+      allow: settings.allow,
+      deny: settings.deny,
+      ask: settings.ask,
       handler: async (req) => {
         session.activeReporter?.suspend?.();
         rl.pause();
         try {
-          const decision = await promptPermission(req.target);
+          const decision = await promptPermission(req.target, req.type === "edit" ? "Edit" : "Execute");
           if (decision === "always") {
-            const prefix = req.target.split(/\s+/)[0];
-            session.permissions?.allowPrefix(prefix);
-            console.log(pc.dim(`  ${icons.check} Allowed '${prefix}' commands for this session.`));
+            if (req.type === "edit") session.permissions?.allowRule(`Edit(${req.target})`);
+            else session.permissions?.allowCommand(req.target);
+            console.log(pc.dim(`  ${icons.check} Allowed this exact ${req.type} for the session: ${req.target}`));
+            logAudit(session.repoRoot, { kind: "permission", tool: req.type, args: { target: req.target }, decision: "allow_session" });
             return true;
           }
+          logAudit(session.repoRoot, {
+            kind: "permission",
+            tool: req.type,
+            args: { target: req.target },
+            decision: decision === "yes" ? "allow" : "deny",
+          });
           return decision === "yes";
         } finally {
           rl.resume();
@@ -567,6 +818,33 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
         }
       },
     });
+  }
+
+  // Plan-mode gate (AG-9): exit_plan_mode shows the plan and waits for
+  // accept / edit / reject. A returned string is the user-revised plan.
+  if (!session.planApprover) {
+    session.planApprover = async (plan: string): Promise<boolean | string> => {
+      session.activeReporter?.suspend?.();
+      rl.pause();
+      try {
+        const decision = await promptPlanApproval(plan);
+        if (decision === "accept") return true;
+        if (decision === "reject") {
+          console.log(pc.yellow("  Plan rejected — staying in plan mode."));
+          return false;
+        }
+        rl.resume();
+        const revised = await new Promise<string>((resolve) => {
+          rl.question(pc.cyan("  Revised plan (Enter to keep as-is): "), (answer) => resolve(answer));
+        });
+        const text = revised.trim() || plan;
+        console.log(pc.green("  Plan revised — unlocking with the edited plan."));
+        return text;
+      } finally {
+        rl.resume();
+        session.activeReporter?.resume?.();
+      }
+    };
   }
 
   let running = false;
@@ -730,6 +1008,24 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
       trimmed = line;
     }
 
+    // `# note` appends to the project memory file (AG-8). Not a task.
+    if (trimmed.startsWith("#")) {
+      const note = trimmed.replace(/^#+\s*/, "");
+      if (!note) {
+        console.log(c.dim("Usage: # <note to remember in the project memory file>"));
+      } else {
+        try {
+          const file = appendMemoryNote(session.repoRoot, note);
+          console.log(pc.green(`  ✔ Remembered in ${file}`));
+        } catch (error) {
+          console.error(pc.red(`  Could not save note: ${error instanceof Error ? error.message : error}`));
+        }
+      }
+      saveHistory(trimmed);
+      promptUser();
+      continue;
+    }
+
     saveHistory(trimmed);
 
     const slash = parseSlashCommand(trimmed);
@@ -882,15 +1178,50 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
           }
           break;
         }
-        case "compact":
+        case "compact": {
+          const focus = args.trim();
           if (session.history && session.history.length > 0) {
             const before = session.history.length;
-            session.history = compactHistory(session.history, { keepRecentToolOutputs: 1, aggressive: true });
+            const modelSettings = loadModelSettings(session.repoRoot);
+            let summarizer: Responder | undefined;
+            if (modelSettings.fast) {
+              try {
+                summarizer = createProviderFromEnv(process.env, {
+                  ...sessionOverrides(session),
+                  model: modelSettings.fast,
+                }).responder;
+              } catch {
+                summarizer = undefined;
+              }
+            }
+            try {
+              session.history = summarizer
+                ? await compactHistoryWithSummary(session.history, summarizer, { keepRecentToolOutputs: 1, aggressive: true, focus: focus || undefined })
+                : compactHistory(session.history, { keepRecentToolOutputs: 1, aggressive: true });
+            } catch {
+              session.history = compactHistory(session.history, { keepRecentToolOutputs: 1, aggressive: true });
+            }
+            if (focus) {
+              session.history = [...session.history, { role: "user", content: `[Focus for compacted context: ${focus}]` }];
+            }
             console.log(`Compacted context memory (${c.cyan(`${before} items`)} → ${c.green(`${session.history.length} items`)}).`);
           } else {
             console.log(c.dim("Context memory is already compact / empty."));
           }
           break;
+        }
+        case "cost":
+          printCost(session);
+          break;
+        case "init": {
+          const { file, created } = generateMemoryFile(session.repoRoot);
+          console.log(
+            created
+              ? pc.green(`  ✔ Created project memory file: ${file}`)
+              : c.dim(`  Memory file already exists: ${file} (edit it directly, or add notes with #)`),
+          );
+          break;
+        }
         case "sessions": {
           handleSessionCommand(session, "list", args);
           if (process.stdin.isTTY) {
@@ -930,6 +1261,13 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
           }
           const restored = await session.checkpoints.restoreLastCheckpoint();
           if (restored) {
+            // Keep the persisted index in sync (SS-1).
+            if (session.activeSession) {
+              session.activeSession.checkpoints = session.checkpoints
+                .listCheckpoints()
+                .map((c) => ({ ...c }));
+              saveSession(session.activeSession, session.sessionHome);
+            }
             console.log(pc.green(`  ✔ Reverted workspace to checkpoint: "${restored.label}" (${restored.id})`));
             const status = await gitStatus(session.repoRoot);
             if (status && status !== "(clean)") {
@@ -937,21 +1275,83 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
             } else {
               console.log(c.dim("  Working tree is clean."));
             }
+            console.log(c.dim("  Tip: /rewind restores code + conversation to an earlier turn; /undo restores code only."));
           } else {
             console.log(c.yellow("  No checkpoints available to undo."));
           }
           break;
         }
+        case "rewind": {
+          const tokens = args.trim().split(/\s+/).filter(Boolean);
+          let selector = "";
+          let scope: RewindScope = "both";
+          for (const t of tokens) {
+            const low = t.toLowerCase();
+            if (low === "code" || low === "conversation" || low === "both") scope = low as RewindScope;
+            else if (!selector) selector = t;
+          }
+          if (!selector) {
+            const turns = session.activeSession?.turns ?? [];
+            if (turns.length === 0) {
+              console.log(c.yellow("  No turns recorded yet — nothing to rewind."));
+              break;
+            }
+            console.log(pc.bold("\nTurns in this session:"));
+            turns.forEach((t) => {
+              console.log(`  ${t.index}. "${t.label.slice(0, 60)}" (${new Date(t.timestamp).toLocaleTimeString()})${t.checkpointId ? c.dim(` [${t.checkpointId}]`) : ""}`);
+            });
+            if (!process.stdin.isTTY) {
+              console.log(c.dim("\n  Usage: /rewind <turn-number> [code|conversation|both]\n"));
+              break;
+            }
+            rl.pause();
+            try {
+              const picked = await promptRewindSelect(turns);
+              if (picked == null) break;
+              selector = String(picked);
+            } finally {
+              rl.resume();
+            }
+          }
+          const result = await doRewind(session, selector, scope);
+          console.log(result.ok ? pc.green(`  ✔ ${result.message}`) : c.yellow(`  ${result.message}`));
+          break;
+        }
+        case "export": {
+          if (!session.activeSession) {
+            console.log(c.yellow("  No active session to export."));
+            break;
+          }
+          const target = args.trim() || path.join(session.repoRoot, defaultExportFilename(session.activeSession));
+          const file = path.isAbsolute(target) ? target : path.join(session.repoRoot, target);
+          try {
+            fs.mkdirSync(path.dirname(file), { recursive: true });
+            fs.writeFileSync(file, exportSessionMarkdown(session.activeSession), "utf8");
+            console.log(pc.green(`  ✔ Exported session to ${file}`));
+          } catch (error) {
+            console.error(pc.red(`  Could not export: ${error instanceof Error ? error.message : error}`));
+          }
+          break;
+        }
         case "checkpoints": {
           const list = session.checkpoints?.listCheckpoints() ?? [];
-          if (list.length === 0) {
+          const turns = session.activeSession?.turns ?? [];
+          if (list.length === 0 && turns.length === 0) {
             console.log(c.dim("  No checkpoints saved yet in this session."));
           } else {
-            console.log(pc.bold("\nSession Checkpoints:"));
-            list.forEach((cp, idx) => {
-              console.log(`  ${idx + 1}. ${c.cyan(cp.id)}: "${cp.label}" (${new Date(cp.timestamp).toLocaleTimeString()})`);
-            });
-            console.log(c.dim("\n  Type /undo to revert to the most recent checkpoint.\n"));
+            if (list.length > 0) {
+              console.log(pc.bold("\nSession Checkpoints:"));
+              list.forEach((cp, idx) => {
+                console.log(`  ${idx + 1}. ${c.cyan(cp.id)}: "${cp.label}" (${new Date(cp.timestamp).toLocaleTimeString()})`);
+              });
+            }
+            if (turns.length > 0) {
+              console.log(pc.bold("\nTurns (for /rewind <n> [code|conversation|both]):"));
+              turns.forEach((t) => {
+                console.log(`  ${t.index}. "${t.label.slice(0, 60)}"${t.checkpointId ? c.dim(` [${t.checkpointId}]`) : ""}`);
+              });
+            }
+            console.log(c.dim("\n  Type /undo to revert code to the most recent checkpoint, or /rewind <n> to restore an earlier turn.\n"));
           }
           break;
         }
@@ -1071,6 +1471,7 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
             });
             saveSession(session.activeSession, session.sessionHome);
           }
+          if (session.checkpoints?.setCheckpoints) session.checkpoints.setCheckpoints([]);
           printBanner(session);
           padToBottom(8);
           break;
@@ -1094,9 +1495,28 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
       continue;
     }
 
-    // Plain text = a task. Take a checkpoint before execution so the user can /undo if needed.
+    // Plain text = a task. Take a per-turn checkpoint (SS-1) so /undo and
+    // /rewind can restore code; the turn (history delta) is appended in runTask.
+    const historyStart = session.history?.length ?? 0;
+    let turnCheckpoint: { id: string; hash: string } | undefined;
     if (session.checkpoints) {
-      await session.checkpoints.saveCheckpoint(trimmed);
+      const cp = await session.checkpoints.saveCheckpoint(trimmed);
+      if (cp && session.activeSession) {
+        turnCheckpoint = { id: cp.id, hash: cp.commitHash };
+        // Persist the checkpoint index with the session (SS-1).
+        if (!session.activeSession.checkpoints?.some((c) => c.id === cp.id)) {
+          session.activeSession.checkpoints = [
+            ...(session.activeSession.checkpoints ?? []),
+            { id: cp.id, timestamp: cp.timestamp, label: cp.label, commitHash: cp.commitHash },
+          ];
+          saveSession(session.activeSession, session.sessionHome);
+        }
+        if (session.checkpoints.setCheckpoints) {
+          session.checkpoints.setCheckpoints(
+            (session.activeSession.checkpoints ?? []).map((c) => ({ ...c })),
+          );
+        }
+      }
     }
 
     running = true;
@@ -1105,7 +1525,11 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
     // visually clear which text is the user query vs agent output.
     printUserMessage(trimmed, { prompt: rl.getPrompt(), input: line });
     try {
-      await runTask(session, trimmed, controller.signal);
+      await runTask(session, trimmed, controller.signal, {
+        historyStart,
+        checkpointId: turnCheckpoint?.id,
+        checkpointHash: turnCheckpoint?.hash,
+      });
     } finally {
       running = false;
     }

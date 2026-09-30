@@ -264,7 +264,8 @@ MODEL=qwen/qwen3-coder:free
 # Type-check TypeScript codebase
 npm run typecheck
 
-# Run full automated test suite (21 test files, 198 tests)
+# Run the automated test suite
+
 npm test
 
 # Build production bundle

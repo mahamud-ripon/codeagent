@@ -1,0 +1,129 @@
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import type { PermissionMode } from "./permissions.js";
+
+export interface PermissionSettings {
+  mode?: PermissionMode;
+  allow: string[];
+  deny: string[];
+  ask: string[];
+}
+
+/**
+ * Model roles (ML-5) and capability overrides (ML-3).
+ * Matches the Appendix C shape: `"model": { "main": "...", "fast": "..." }`.
+ * A plain string is shorthand for `{ "main": "<id>" }`.
+ */
+export interface ModelSettings {
+  /** Primary agent model. Falls back to $MODEL / provider default. */
+  main?: string;
+  /** Cheap model for titles, compaction summaries, intent checks. */
+  fast?: string;
+  /** Model used for plan-mode exploration. Falls back to main. */
+  plan?: string;
+  /** Small-model mode (ML-4): short prompt, fewer tools, one tool per turn. */
+  smallModel?: boolean;
+  capabilities?: {
+    contextWindow?: number;
+    maxOutput?: number;
+  };
+}
+
+function readJson(file: string): Record<string, unknown> | null {
+  try {
+    const raw = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+    return raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+function strings(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.trim().length > 0);
+}
+
+const MODES = new Set<PermissionMode>(["default", "acceptEdits", "plan", "bypass"]);
+
+/**
+ * Merge permission rules from the user config, the project config, and the local override.
+ * Later files replace `mode`. Allow, ask, and deny lists accumulate. Deny still wins at check time.
+ */
+export function loadPermissionSettings(repoRoot: string, homeDir: string = os.homedir()): PermissionSettings {
+  const files = [
+    path.join(homeDir, ".codeagent", "settings.json"),
+    path.join(repoRoot, ".codeagent", "settings.json"),
+    path.join(repoRoot, ".codeagent", "settings.local.json"),
+  ];
+  const merged: PermissionSettings = { allow: [], deny: [], ask: [] };
+  for (const file of files) {
+    if (!fs.existsSync(file)) continue;
+    const json = readJson(file);
+    const permissions = json?.permissions;
+    if (!permissions || typeof permissions !== "object") continue;
+    const record = permissions as Record<string, unknown>;
+    if (typeof record.mode === "string" && MODES.has(record.mode as PermissionMode)) {
+      merged.mode = record.mode as PermissionMode;
+    }
+    merged.allow.push(...strings(record.allow));
+    merged.deny.push(...strings(record.deny));
+    merged.ask.push(...strings(record.ask));
+  }
+  return merged;
+}
+
+function positiveInt(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : undefined;
+}
+
+function nonEmptyString(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+/**
+ * Merge `model` role settings from the same three settings files as
+ * permissions. Later files win for main/fast/plan; capability fields merge
+ * per key with the same last-file-wins rule.
+ */
+export function loadModelSettings(repoRoot: string, homeDir: string = os.homedir()): ModelSettings {
+  const files = [
+    path.join(homeDir, ".codeagent", "settings.json"),
+    path.join(repoRoot, ".codeagent", "settings.json"),
+    path.join(repoRoot, ".codeagent", "settings.local.json"),
+  ];
+  const merged: ModelSettings = {};
+  for (const file of files) {
+    if (!fs.existsSync(file)) continue;
+    const json = readJson(file);
+    const model = json?.model;
+    if (typeof model === "string") {
+      const main = nonEmptyString(model);
+      if (main) merged.main = main;
+      continue;
+    }
+    if (!model || typeof model !== "object") continue;
+    const record = model as Record<string, unknown>;
+    for (const role of ["main", "fast", "plan"] as const) {
+      const id = nonEmptyString(record[role]);
+      if (id) merged[role] = id;
+    }
+    if (typeof record.smallModel === "boolean") merged.smallModel = record.smallModel;
+    const caps = record.capabilities;
+    if (caps && typeof caps === "object") {
+      const capsRecord = caps as Record<string, unknown>;
+      const contextWindow = positiveInt(capsRecord.contextWindow);
+      const maxOutput = positiveInt(capsRecord.maxOutput);
+      if (contextWindow !== undefined || maxOutput !== undefined) {
+        merged.capabilities = {
+          ...merged.capabilities,
+          ...(contextWindow !== undefined ? { contextWindow } : {}),
+          ...(maxOutput !== undefined ? { maxOutput } : {}),
+        };
+      }
+    }
+  }
+  return merged;
+}

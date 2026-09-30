@@ -1,6 +1,6 @@
 import { executeTool } from "../tools/index.js";
 import { buildInitialContext } from "./context.js";
-import { discoverRules } from "./rules.js";
+import { discoverRules, loadProjectMemory } from "./rules.js";
 import {
   createInitialState,
   inferPhase,
@@ -14,14 +14,21 @@ import { createProviderFromEnv } from "../llm/provider.js";
 import { truncate } from "../utils/truncate.js";
 
 import { PermissionManager } from "./permissions.js";
-import { compactHistory } from "./compactor.js";
+import { compactHistory, compactHistoryWithSummary, estimateHistoryChars, shouldCompactHistory } from "./compactor.js";
 import { getQuickDiagnostics } from "./diagnostics.js";
 import type { AgentReporter } from "../cli/ui/reporter.js";
+import { estimateCostUsd, getModelCapabilities } from "../llm/capabilities.js";
+import type { AgentEvent } from "../llm/events.js";
+import type { ProviderOverrides } from "../llm/provider.js";
+import type { ResponsesCreateResult } from "../llm/client.js";
 import { TodoManager } from "./todo.js";
 import { PlanModeManager } from "./planMode.js";
 import { evaluateStopHooks } from "./stopHooks.js";
 import { FileStateCache } from "../tools/fileStateCache.js";
 import { isConcurrencySafeTool } from "../tools/streamingExecutor.js";
+import { detectNoProgress } from "./progress.js";
+import { logAudit } from "./audit.js";
+import { isAuthError as isAuthErrorFromRetry, isRateLimitError as isRateLimitErrorFromRetry } from "../llm/retry.js";
 
 export interface AgentOptions extends AgentConfig {
   /** Injected for tests — defaults to the provider selected from env. */
@@ -34,12 +41,50 @@ export interface AgentOptions extends AgentConfig {
   permissions?: PermissionManager;
   /** Optional visual progress reporter (spinners, tool cards). */
   reporter?: AgentReporter;
+  /**
+   * Plan-mode approver (AG-9): shows exit_plan_mode plans and requires
+   * accept / edit / reject. A returned string is the user-revised plan.
+   */
+  planApprover?: (plan: string) => Promise<boolean | string>;
   /** Dynamic task/todo manager. */
   todoManager?: TodoManager;
   /** Plan mode state manager. */
   planModeManager?: PlanModeManager;
   /** File snapshot & drift cache. */
   fileStateCache?: FileStateCache;
+  /** When true, mutating tools run without asking. Default is ask / fail closed. */
+  autoApprove?: boolean;
+  provider?: string;
+  baseURL?: string;
+  onEvent?: (event: AgentEvent) => void;
+  contextWindow?: number;
+  maxTotalTokens?: number;
+  maxCostUsd?: number;
+  /**
+   * Fast-model responder used for LLM-written compaction summaries (AG-6).
+   * When absent, the heuristic summary is used. Never throws: failures fall
+   * back to the heuristic path.
+   */
+  summarizer?: Responder;
+  /** Per-settings capability overrides (ML-3): window and output caps. */
+  capabilitiesOverride?: { contextWindow?: number; maxOutput?: number };
+  /**
+   * Streaming provider (ML-1). When present, the loop streams text/thinking
+   * deltas incrementally via onEvent instead of emitting one bulk text_delta
+   * after the full reply. Responder remains the fallback so tests keep passing.
+   */
+  providerInstance?: import("../llm/stream.js").Provider;
+  /** System prompt override (modular/versioned prompts, small-model mode). */
+  systemPrompt?: string;
+  /** User hooks config (EX-3): PreToolUse/PostToolUse/Stop/PreCompact. */
+  hooks?: import("./hooks.js").HookConfig;
+}
+
+export class StuckError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "StuckError";
+  }
 }
 
 export interface RunOpts {
@@ -57,14 +102,12 @@ const MAX_RATE_LIMIT_RETRIES = 5;
 const RATE_LIMIT_BACKOFF_MS = [10_000, 20_000, 30_000, 45_000, 60_000];
 
 export function isRateLimitError(message: string): boolean {
-  return /429|413|rate.?limit|too many requests|tokens per minute|\bTPM\b|\bRPD\b|overloaded|capacity/i.test(
-    message,
-  );
+  return isRateLimitErrorFromRetry(message);
 }
 
 /** 401/403s never resolve by retrying — fail immediately with a fix. */
 export function isAuthError(message: string): boolean {
-  return /401|403|invalid api key|incorrect api key|unauthorized|authentication/i.test(message);
+  return isAuthErrorFromRetry(message);
 }
 
 function signatureFor(name: string, args: Record<string, unknown>): string {
@@ -78,23 +121,53 @@ function extractExitCode(output: string): number | null {
 
 export class Agent {
   private responder: Responder;
+  private providerInstance?: import("../llm/stream.js").Provider;
+  private systemPrompt?: string;
   private verbose: boolean;
   private permissions: PermissionManager;
   private reporter?: AgentReporter;
   private todoManager: TodoManager;
   private planModeManager: PlanModeManager;
   private fileStateCache: FileStateCache;
+  private providerOverrides: ProviderOverrides;
+  private usage = { input: 0, output: 0, costUsd: 0 };
 
   constructor(private options: AgentOptions) {
     this.verbose = options.verbose ?? true;
+    this.providerOverrides = {
+      model: options.model,
+      provider: options.provider,
+      baseURL: options.baseURL,
+    };
     this.responder =
       options.responder ??
-      createProviderFromEnv(process.env, { model: options.model }).responder;
-    this.permissions = options.permissions ?? new PermissionManager({ autoApprove: true });
+      createProviderFromEnv(process.env, this.providerOverrides).responder;
+    this.providerInstance = options.providerInstance;
+    this.systemPrompt = options.systemPrompt;
+    this.permissions = options.permissions ?? new PermissionManager({ autoApprove: options.autoApprove ?? false });
     this.reporter = options.reporter;
     this.todoManager = options.todoManager ?? new TodoManager();
     this.planModeManager = options.planModeManager ?? new PlanModeManager();
     this.fileStateCache = options.fileStateCache ?? new FileStateCache();
+  }
+
+  private emit(event: AgentEvent): void {
+    this.options.onEvent?.(event);
+  }
+
+  /**
+   * ML-1 streaming call shape: when a Provider is injected, forward its
+   * text/thinking deltas to onEvent as they arrive, then collapse to the
+   * legacy result the loop already understands. Otherwise use Responder.
+   */
+  private async callModel(input: unknown[], opts?: { tools?: boolean; signal?: AbortSignal }): Promise<ResponsesCreateResult> {
+    if (!this.providerInstance) return this.responder(input, opts);
+    const { collectStreamingWithEmit } = await import("../llm/collectStream.js");
+    return collectStreamingWithEmit(
+      this.providerInstance,
+      { system: this.systemPrompt ?? "", messages: input, tools: opts?.tools ?? true, signal: opts?.signal },
+      (e) => this.emit(e),
+    );
   }
 
   getTodoManager(): TodoManager {
@@ -142,7 +215,7 @@ export class Agent {
         this.checkCancelled(signal);
 
         const thinkingStart = Date.now();
-        const result = await this.responder(input, { tools: false });
+        const result = await this.callModel(input, { tools: false, signal });
         const thinkingDurationMs = Date.now() - thinkingStart;
         if (result.reasoning_text?.trim() && this.reporter?.onThinking) {
           this.reporter.onThinking(result.reasoning_text.trim(), thinkingDurationMs);
@@ -176,9 +249,10 @@ export class Agent {
     });
 
     const rules = discoverRules(repoRoot);
+    const memory = loadProjectMemory(repoRoot);
 
     if (!hasRepoContext) {
-      const repoContext = await buildInitialContext(repoRoot, rules);
+      const repoContext = await buildInitialContext(repoRoot, rules, memory);
       input.push({
         role: "system",
         content: repoContext,
@@ -195,6 +269,7 @@ export class Agent {
     let rateLimitRetries = 0;
     let maxOutputTokensRecoveryCount = 0;
     let reviewed = false;
+    let lastDenied = false;
     let hasPromptedFinalSummary = false;
     const sleep = this.options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 
@@ -211,9 +286,27 @@ export class Agent {
       let result;
       let thinkingDurationMs = 0;
       try {
-        const compacted = compactHistory(input);
+        const contextWindow = this.options.contextWindow
+          ?? getModelCapabilities(this.options.model, this.options.capabilitiesOverride).contextWindow;
+        let requestInput = input;
+        if (shouldCompactHistory(input, contextWindow)) {
+          const before = estimateHistoryChars(input);
+          // Scale the compact target to the window (aim to halve usage)
+          // instead of the legacy fixed 28k-char budget, and bound the
+          // kept recent outputs by tokens (10% of the window).
+          const compactOpts = {
+            maxTotalChars: Math.floor(contextWindow * 0.5 * 4),
+            keepRecentToolOutputTokens: Math.floor(contextWindow * 0.1),
+          };
+          requestInput = this.options.summarizer
+            ? await compactHistoryWithSummary(input, this.options.summarizer, compactOpts)
+            : compactHistory(input, compactOpts);
+          input = requestInput;
+          this.emit({ type: "compaction", before, after: estimateHistoryChars(input) });
+        }
+        this.emit({ type: "turn_start", turn: state.iteration });
         const thinkingStart = Date.now();
-        result = await this.responder(compacted);
+        result = await this.callModel(requestInput, { signal });
         thinkingDurationMs = Date.now() - thinkingStart;
         consecutiveApiErrors = 0;
         rateLimitRetries = 0;
@@ -305,10 +398,55 @@ export class Agent {
       }
 
       const toolCalls = result.output.filter((item) => item.type === "function_call");
+      // Streaming providers already emitted incremental deltas via callModel.
+      if (!this.providerInstance) {
+        if (result.output_text) this.emit({ type: "text_delta", text: result.output_text });
+        if (result.reasoning_text) this.emit({ type: "thinking_delta", text: result.reasoning_text });
+      }
+      if (result.usage) {
+        this.usage.input += result.usage.input;
+        this.usage.output += result.usage.output;
+        const cost = result.usage.costUsd ?? estimateCostUsd(this.options.model, result.usage.input, result.usage.output) ?? 0;
+        this.usage.costUsd += cost;
+        this.emit({
+          type: "usage",
+          input: result.usage.input,
+          output: result.usage.output,
+          cachedInput: result.usage.cachedInput,
+          costUsd: cost,
+        });
+        const used = this.usage.input + this.usage.output;
+        if (this.options.maxTotalTokens && used > this.options.maxTotalTokens) {
+          return {
+            finalMessage: `Stopped: token budget of ${this.options.maxTotalTokens} exceeded (${used} tokens used).`,
+            iterations: state.iteration,
+            modifiedFiles: [...state.modifiedFiles],
+            testResults: state.testResults,
+            history: input,
+            intent,
+            stopReason: "budget",
+            usage: { ...this.usage },
+          };
+        }
+        if (this.options.maxCostUsd !== undefined && this.usage.costUsd > this.options.maxCostUsd) {
+          return {
+            finalMessage: `Stopped: cost budget of $${this.options.maxCostUsd} exceeded ($${this.usage.costUsd.toFixed(4)}).`,
+            iterations: state.iteration,
+            modifiedFiles: [...state.modifiedFiles],
+            testResults: state.testResults,
+            history: input,
+            intent,
+            stopReason: "budget",
+            usage: { ...this.usage },
+          };
+        }
+      }
 
       // Estimate tokens and notify reporter
       const totalChars = JSON.stringify(result.output).length + (result.reasoning_text?.length ?? 0);
-      const estTokens = Math.max(12, Math.round(totalChars / 4));
+      const estTokens = result.usage
+        ? result.usage.input + result.usage.output
+        : Math.max(12, Math.round(totalChars / 4));
       if (this.reporter?.setEstimatedTokens) {
         this.reporter.setEstimatedTokens(estTokens);
       }
@@ -448,14 +586,18 @@ export class Agent {
 
         state.phase = "done";
         this.reporter?.stop();
-        return {
+        const done = {
           finalMessage: finalText,
           iterations: state.iteration,
           modifiedFiles: [...state.modifiedFiles],
           testResults: state.testResults,
           history: input,
           intent,
+          stopReason: lastDenied ? ("permission" as const) : ("ok" as const),
+          usage: { ...this.usage },
         };
+        this.emit({ type: "done", result: done });
+        return done;
       }
 
       const executeSingleCall = async (call: (typeof toolCalls)[number]) => {
@@ -485,8 +627,18 @@ export class Agent {
         if (state.recentSignatures.length > RECENT_WINDOW) state.recentSignatures.shift();
         const repeats = state.recentSignatures.filter((s) => s === sig).length;
         if (repeats >= REPEAT_ABORT_THRESHOLD) {
-          throw new Error(
-            `Agent appears stuck repeating '${name}' with identical arguments (${repeats}x). Aborting.`,
+          const tried = state.toolCalls
+            .slice(-6)
+            .map((call) => `${call.name} ${JSON.stringify(call.args).slice(0, 120)}`)
+            .join("\n");
+          throw new StuckError(
+            [
+              `Stuck: repeated '${name}' with identical arguments ${repeats} times. Stopping so this run can be resumed with a different approach.`,
+              `Last arguments: ${JSON.stringify(args).slice(0, 400)}`,
+              `Files modified so far: ${[...state.modifiedFiles].join(", ") || "(none)"}`,
+              `Recent calls:\n${tried || "(none)"}`,
+              `Recent errors: ${state.errors.slice(-3).join(" | ") || "(none)"}`,
+            ].join("\n"),
           );
         }
         if (repeats >= REPEAT_WARN_THRESHOLD) {
@@ -501,10 +653,29 @@ export class Agent {
           return { callId, name, args, output: warn, success: false, summary: "repeat warning" };
         }
 
+        const pathArgEarly = typeof args.path === "string" ? args.path : "";
+        if ((name === "read" || name === "read_file" || name === "view_file") && pathArgEarly && !this.permissions.checkRead(pathArgEarly)) {
+          lastDenied = true;
+          logAudit(repoRoot, { kind: "permission", tool: name, args: { path: pathArgEarly }, decision: "deny", detail: "read denied" });
+          const output = `TOOL ERROR (${name}): User denied read of "${pathArgEarly}".`;
+          return { callId, name, args, output, success: false, summary: "user denied read" };
+        }
+        if ((name === "write_file" || name === "edit_file" || name === "multi_edit") && pathArgEarly) {
+          const allowedEdit = await this.permissions.checkEdit(pathArgEarly, name);
+          if (!allowedEdit) {
+            lastDenied = true;
+            logAudit(repoRoot, { kind: "permission", tool: name, args: { path: pathArgEarly }, decision: "deny", detail: "edit denied" });
+            const output = `TOOL ERROR (${name}): User denied edit of "${pathArgEarly}". Propose a different approach or ask for permission.`;
+            if (this.reporter) this.reporter.onToolComplete(name, args, "User denied edit", false, 0);
+            return { callId, name, args, output, success: false, summary: "user denied edit" };
+          }
+        }
         if (name === "run_command") {
           const cmd = String(args.command ?? "");
           const allowed = await this.permissions.checkCommand(cmd);
           if (!allowed) {
+            lastDenied = true;
+            logAudit(repoRoot, { kind: "permission", tool: name, args: { command: cmd }, decision: "deny", detail: "command denied" });
             const output = `TOOL ERROR (run_command): User denied execution of command "${cmd}". Propose a different approach or proceed without running this command.`;
             if (this.reporter) {
               this.reporter.onToolComplete(name, args, "User denied execution", false, 0);
@@ -529,16 +700,30 @@ export class Agent {
         let toolOutput: string;
         let success = true;
         try {
+          this.emit({ type: "tool_start", id: callId, name, args });
           toolOutput = await executeTool(repoRoot, name, args, signal, {
             todoManager: this.todoManager,
             planModeManager: this.planModeManager,
             fileStateCache: this.fileStateCache,
+            responder: this.responder,
+            providerOverrides: this.providerOverrides,
+            planApprover: this.options.planApprover,
+            hooks: this.options.hooks,
           });
+          // EX-3 PostToolUse hooks (best effort, never block).
+          if (this.options.hooks) {
+            try {
+              const { runHooks } = await import("./hooks.js");
+              await runHooks(this.options.hooks, "PostToolUse", { tool: name, output: toolOutput.slice(0, 2000) });
+            } catch {
+              // ignore
+            }
+          }
         } catch (error) {
           success = false;
           let message = error instanceof Error ? error.message : String(error);
           if (name === "edit_file" && pathArg && !hadReadBefore) {
-            message += ` (Safety advisory: file '${pathArg}' was not inspected before editing; call read_file or view_file first to verify exact contents)`;
+            message += ` (Safety advisory: file '${pathArg}' was not inspected before editing; call read first to verify exact contents)`;
           }
           toolOutput = `TOOL ERROR (${name}): ${message}`;
           state.errors.push(`${name}: ${message}`);
@@ -562,6 +747,16 @@ export class Agent {
         }
 
         const toolDuration = Date.now() - toolStartTime;
+        if (success) lastDenied = false;
+        this.emit({ type: "tool_end", id: callId, ok: success, output: toolOutput.slice(0, 500), ms: toolDuration });
+        logAudit(repoRoot, {
+          kind: "tool",
+          tool: name,
+          args,
+          ok: success,
+          ms: toolDuration,
+          detail: toolOutput.slice(0, 300),
+        });
         if (this.reporter) {
           this.reporter.onToolComplete(name, args, toolOutput, success, toolDuration);
         } else {
@@ -571,7 +766,7 @@ export class Agent {
         }
 
         // Bookkeeping the model can't be trusted to do itself.
-        if (pathArg && ["read_file", "view_file", "write_file", "edit_file", "view_symbol_outline"].includes(name)) {
+        if (pathArg && ["read", "read_file", "view_file", "write_file", "edit_file", "view_symbol_outline"].includes(name)) {
           state.relevantFiles.add(pathArg);
         }
         if (pathArg && success && ["write_file", "edit_file"].includes(name)) {
@@ -632,9 +827,28 @@ export class Agent {
             `Running ${batch.length} read operations concurrently: ${batch.map((b) => b.name).join(", ")}...`,
           );
         }
-        const executed = isParallel
-          ? await Promise.all(batch.map((call) => executeSingleCall(call)))
-          : [await executeSingleCall(batch[0])];
+        let executed: Awaited<ReturnType<typeof executeSingleCall>>[];
+        try {
+          executed = isParallel
+            ? await Promise.all(batch.map((call) => executeSingleCall(call)))
+            : [await executeSingleCall(batch[0]!)];
+        } catch (error) {
+          if (error instanceof StuckError) {
+            const stuck = {
+              finalMessage: error.message,
+              iterations: state.iteration,
+              modifiedFiles: [...state.modifiedFiles],
+              testResults: state.testResults,
+              history: input,
+              intent,
+              stopReason: "stuck" as const,
+              usage: { ...this.usage },
+            };
+            this.emit({ type: "done", result: stuck });
+            return stuck;
+          }
+          throw error;
+        }
 
         for (const res of executed) {
           state.toolCalls.push({
@@ -645,6 +859,33 @@ export class Agent {
             summary: res.summary,
           });
           input.push({ type: "function_call_output", call_id: res.callId, output: res.output });
+        }
+
+        // No-progress detector: stall without exact repeats (e.g. every
+        // call fails differently, or reads pile up with no durable effect).
+        const verdict = detectNoProgress({
+          toolCalls: state.toolCalls,
+          testResults: state.testResults,
+          errors: state.errors,
+          modifiedFilesCount: state.modifiedFiles.size,
+        });
+        if (verdict.stalled) {
+          const stuck = {
+            finalMessage: [
+              `Stuck: ${verdict.reason ?? "no forward progress detected."} Stopping so this run can be resumed with a different approach.`,
+              `Files modified so far: ${[...state.modifiedFiles].join(", ") || "(none)"}`,
+              `Recent errors: ${state.errors.slice(-3).join(" | ") || "(none)"}`,
+            ].join("\n"),
+            iterations: state.iteration,
+            modifiedFiles: [...state.modifiedFiles],
+            testResults: state.testResults,
+            history: input,
+            intent,
+            stopReason: "stuck" as const,
+            usage: { ...this.usage },
+          };
+          this.emit({ type: "done", result: stuck });
+          return stuck;
         }
       }
     }

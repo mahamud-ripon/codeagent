@@ -43,6 +43,8 @@ export interface AgentRunResult {
   testResults: TestRecord[];
   history?: unknown[];
   intent?: AgentIntent;
+  stopReason?: "ok" | "stuck" | "permission" | "budget" | "error";
+  usage?: { input: number; output: number; costUsd: number };
 }
 
 export function createInitialState(userRequest: string): AgentState {

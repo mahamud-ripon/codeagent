@@ -87,13 +87,16 @@ const READ_ONLY_DISPLAYS: Record<string, string> = {
 export function toolStyle(toolName: string): ToolStyle {
   switch (toolName) {
     case "edit_file":
+    case "multi_edit":
       return { display: "Edit", color: (s) => pc.yellow(s) };
     case "write_file":
       return { display: "Write", color: (s) => pc.yellow(s) };
     case "run_command":
       return { display: "Bash", color: (s) => pc.magenta(s) };
     case "search":
+    case "grep":
     case "grep_search":
+    case "glob":
       return { display: "Search", color: (s) => pc.cyan(s) };
     case "run_subagent":
       return { display: "Task", color: (s) => pc.magenta(s) };

@@ -31,6 +31,10 @@ export function computeFileHash(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
 }
 
+function cacheKey(relativePath: string): string {
+  return relativePath.replace(/\\/g, "/").replace(/^\.\//, "");
+}
+
 export class FileStateCache {
   // filePath -> array of snapshots (most recent last)
   private history: Map<string, FileSnapshot[]> = new Map();
@@ -52,11 +56,12 @@ export class FileStateCache {
         timestamp: Date.now(),
       };
 
-      const list = this.history.get(relativePath) ?? [];
+      const key = cacheKey(relativePath);
+      const list = this.history.get(key) ?? [];
       list.push(snapshot);
       if (list.length > 20) list.shift(); // retain last 20 snapshots per file
-      this.history.set(relativePath, list);
-      this.knownHashes.set(relativePath, hash);
+      this.history.set(key, list);
+      this.knownHashes.set(key, hash);
 
       return snapshot;
     } catch {
@@ -68,8 +73,12 @@ export class FileStateCache {
    * Records the hash observed during a read operation.
    */
   recordRead(relativePath: string, content: string): void {
-    const hash = computeFileHash(content);
-    this.knownHashes.set(relativePath, hash);
+    this.knownHashes.set(cacheKey(relativePath), computeFileHash(content));
+  }
+
+  /** True once this session has read or written the file. Never-read is not "no drift". */
+  hasObserved(relativePath: string): boolean {
+    return this.knownHashes.has(cacheKey(relativePath));
   }
 
   /**
@@ -77,17 +86,20 @@ export class FileStateCache {
    * are known and do not trigger false external drift warnings.
    */
   recordWrite(relativePath: string, content: string): void {
-    const hash = computeFileHash(content);
-    this.knownHashes.set(relativePath, hash);
+    this.knownHashes.set(cacheKey(relativePath), computeFileHash(content));
   }
 
   /**
    * Checks whether the file on disk has changed externally since it was last read.
    */
   async detectDrift(repoRoot: string, relativePath: string): Promise<DriftCheckResult> {
-    const expectedHash = this.knownHashes.get(relativePath);
+    const key = cacheKey(relativePath);
+    const expectedHash = this.knownHashes.get(key);
     if (!expectedHash) {
-      return { hasDrifted: false };
+      return {
+        hasDrifted: true,
+        message: `File '${relativePath}' was not read this session. Read it before editing.`,
+      };
     }
 
     const absolute = resolveInsideRepo(repoRoot, relativePath);
@@ -113,17 +125,17 @@ export class FileStateCache {
    * Reverts a file to its snapshot prior to the most recent modification.
    */
   async rollback(repoRoot: string, relativePath: string): Promise<boolean> {
-    const list = this.history.get(relativePath);
+    const list = this.history.get(cacheKey(relativePath));
     if (!list || list.length === 0) return false;
 
     const previous = list.pop()!;
     const absolute = resolveInsideRepo(repoRoot, relativePath);
     await fs.writeFile(absolute, previous.content, "utf8");
-    this.knownHashes.set(relativePath, previous.hash);
+    this.knownHashes.set(cacheKey(relativePath), previous.hash);
     return true;
   }
 
   getSnapshotCount(relativePath: string): number {
-    return this.history.get(relativePath)?.length ?? 0;
+    return this.history.get(cacheKey(relativePath))?.length ?? 0;
   }
 }

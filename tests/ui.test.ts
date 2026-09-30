@@ -1,3 +1,4 @@
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   formatDuration,
@@ -25,8 +26,9 @@ describe("UI Theme & Helpers", () => {
   });
 
   it("formats relative paths", () => {
-    const formatted = formatPath("D:/Codeagent/src/index.ts", "D:/Codeagent");
-    expect(formatted).toBe("src\\index.ts".replace("/", "\\"));
+    const root = path.resolve("repo-root");
+    const formatted = formatPath(path.join(root, "src", "index.ts"), root);
+    expect(formatted).toBe(path.join("src", "index.ts"));
   });
 
   it("formats user prompt as a full-width background bar", () => {

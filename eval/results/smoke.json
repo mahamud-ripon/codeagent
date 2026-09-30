@@ -1,0 +1,7 @@
+{
+  "mode": "smoke",
+  "tasks": 36,
+  "ok": true,
+  "errors": [],
+  "note": "Live model scores need EVAL_LIVE=1 and an API key. This smoke run checks the task set only."
+}

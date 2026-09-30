@@ -1,6 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { resolveInsideRepo } from "../utils/paths.js";
+import { assertRealpathInsideRepo, resolveInsideRepo } from "../utils/paths.js";
 import { TRUNCATION_BUDGETS, truncate } from "../utils/truncate.js";
 import { isIgnoredDir, isSecretPath } from "../repo/ignore.js";
 import { applyMultiStrategyPatch, validateSyntaxPreFlight } from "./patch.js";
@@ -68,6 +68,17 @@ function assertNotSecret(repoRelative: string): void {
   }
 }
 
+export function assertNotProtected(repoRelative: string): void {
+  const normalized = repoRelative.replace(/\\/g, "/");
+  if (/(^|\/)\.git(\/|$)/i.test(normalized) || /(^|\/)\.codeagent(\/|$)/i.test(normalized)) {
+    throw new Error(`Refusing to modify protected path: ${repoRelative}`);
+  }
+  const base = normalized.split("/").pop() ?? normalized;
+  if (/^\.(bashrc|zshrc|profile|bash_profile|zprofile)$/i.test(base)) {
+    throw new Error(`Refusing to modify shell startup file: ${repoRelative}`);
+  }
+}
+
 export async function listFiles(repoRoot: string, relative = "."): Promise<string> {
   const root = path.resolve(repoRoot);
   const startDir = resolveInsideRepo(root, relative);
@@ -130,6 +141,7 @@ export async function readFile(repoRoot: string, filePath: string): Promise<stri
     );
   }
 
+  await assertRealpathInsideRepo(repoRoot, absolute);
   await assertNotBinary(absolute, filePath);
   const content = await fs.readFile(absolute, "utf8");
   return truncate(content, TRUNCATION_BUDGETS.fileRead);
@@ -139,7 +151,6 @@ export interface ViewFileOptions {
   startLine?: number;
   endLine?: number;
 }
-
 export async function viewFile(
   repoRoot: string,
   filePath: string,
@@ -187,6 +198,31 @@ export async function viewFile(
   return `${header}\n${numbered.join("\n")}`;
 }
 
+export interface ReadOptions {
+  /** 1-indexed first line (default 1). */
+  offset?: number;
+  /** Max lines to return (default: whole file). */
+  limit?: number;
+}
+
+/**
+ * Unified read: full-file text like `read_file` when no range is given,
+ * line-numbered slice like `view_file` when offset/limit are set.
+ * `read_file` and `view_file` remain as thin aliases for compatibility.
+ */
+export async function readPath(
+  repoRoot: string,
+  filePath: string,
+  options?: ReadOptions,
+): Promise<string> {
+  if (options?.offset === undefined && options?.limit === undefined) {
+    return readFile(repoRoot, filePath);
+  }
+  const startLine = options?.offset ?? 1;
+  const endLine = options?.limit !== undefined ? startLine + options.limit - 1 : undefined;
+  return viewFile(repoRoot, filePath, { startLine, endLine });
+}
+
 export async function writeFile(
   repoRoot: string,
   filePath: string,
@@ -198,9 +234,14 @@ export async function writeFile(
   }
   validateSyntaxPreFlight(content, filePath);
   const absolute = resolveInsideRepo(repoRoot, filePath);
+  await assertRealpathInsideRepo(repoRoot, absolute);
   await fs.mkdir(path.dirname(absolute), { recursive: true });
   await fs.writeFile(absolute, content, "utf8");
   return `Wrote ${filePath}`;
+}
+
+export interface EditOptions {
+  replaceAll?: boolean;
 }
 
 export async function editFile(
@@ -208,9 +249,11 @@ export async function editFile(
   filePath: string,
   oldText: string,
   newText: string,
+  options?: EditOptions,
 ): Promise<string> {
   assertNotSecret(filePath);
   const absolute = resolveInsideRepo(repoRoot, filePath);
+  await assertRealpathInsideRepo(repoRoot, absolute);
 
   let stat;
   try {
@@ -224,7 +267,48 @@ export async function editFile(
   await assertNotBinary(absolute, filePath);
   const content = await fs.readFile(absolute, "utf8");
 
-  const { updated, strategy } = applyMultiStrategyPatch(content, oldText, newText, filePath);
+  const { updated, strategy, replacements, diffPreview } = applyMultiStrategyPatch(
+    content,
+    oldText,
+    newText,
+    filePath,
+    options,
+  );
   await fs.writeFile(absolute, updated, "utf8");
-  return `Edited ${filePath} (strategy: ${strategy})`;
+  const count = replacements && replacements > 1 ? `, replacements: ${replacements}` : "";
+  const preview = diffPreview ? `\nDiff preview (confirm this is the intended region):\n${diffPreview}` : "";
+  return `Edited ${filePath} (strategy: ${strategy}${count})${preview}`;
+}
+
+export interface MultiEdit {
+  oldText: string;
+  newText: string;
+  replaceAll?: boolean;
+}
+
+/** Apply every edit to an in-memory copy. The file is written once, or not at all. */
+export async function multiEdit(repoRoot: string, filePath: string, edits: MultiEdit[]): Promise<string> {
+  if (edits.length === 0) throw new Error("multi_edit requires at least one edit");
+  assertNotSecret(filePath);
+  const absolute = resolveInsideRepo(repoRoot, filePath);
+  await assertRealpathInsideRepo(repoRoot, absolute);
+  let stat;
+  try {
+    stat = await fs.stat(absolute);
+  } catch {
+    throw new Error(`File not found: ${filePath}`);
+  }
+  if (!stat.isFile()) throw new Error(`${filePath} is not a file`);
+  await assertNotBinary(absolute, filePath);
+  let content = await fs.readFile(absolute, "utf8");
+  const strategies: string[] = [];
+  for (const edit of edits) {
+    const result = applyMultiStrategyPatch(content, edit.oldText, edit.newText, filePath, {
+      replaceAll: edit.replaceAll,
+    });
+    content = result.updated;
+    strategies.push(result.strategy);
+  }
+  await fs.writeFile(absolute, content, "utf8");
+  return `Edited ${filePath} (${edits.length} edits, strategies: ${strategies.join(", ")})`;
 }
