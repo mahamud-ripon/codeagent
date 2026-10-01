@@ -34,6 +34,8 @@ export interface SessionRecord {
   modifiedFiles: string[];
   checkpoints?: CheckpointRef[];
   turns?: TurnSnapshot[];
+  /** Cumulative usage — persisted so /cost survives resume (Claude Code parity). */
+  usage?: { input: number; output: number; costUsd: number; cachedInput?: number };
 }
 
 export function sessionsDir(home: string = os.homedir()): string {
@@ -116,6 +118,13 @@ function normalizeRecord(raw: unknown, fallbackRepoRoot: string): SessionRecord 
         !!t && typeof t === "object" && typeof (t as TurnSnapshot).index === "number",
     );
   };
+  const asUsage = (v: unknown): SessionRecord["usage"] => {
+    if (!v || typeof v !== "object") return undefined;
+    const u = v as Record<string, unknown>;
+    const num = (x: unknown): number => (typeof x === "number" && Number.isFinite(x) ? x : 0);
+    if (u.input === undefined && u.output === undefined && u.costUsd === undefined) return undefined;
+    return { input: num(u.input), output: num(u.output), costUsd: num(u.costUsd), cachedInput: num(u.cachedInput) };
+  };
   return {
     id: r.id,
     title: typeof r.title === "string" && r.title ? r.title : "New session",
@@ -130,6 +139,7 @@ function normalizeRecord(raw: unknown, fallbackRepoRoot: string): SessionRecord 
     modifiedFiles: asArray(r.modifiedFiles).filter((f): f is string => typeof f === "string"),
     checkpoints: asCheckpoints(r.checkpoints),
     turns: asTurns(r.turns),
+    usage: asUsage(r.usage),
   };
 }
 
@@ -138,17 +148,80 @@ function readJsonFile(file: string): unknown | null {
     if (!fs.existsSync(file)) return null;
     return JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
   } catch {
+    // Corrupt JSON (crash mid-write before crash-safe path existed):
+    // quarantine instead of silently treating as missing.
+    try {
+      const bad = `${file}.corrupt.${Date.now()}`;
+      fs.renameSync(file, bad);
+    } catch {
+      // ignore quarantine failure
+    }
     return null;
   }
 }
 
-/** Crash-safe write: tmp file + rename so a crash never leaves a half-written JSON. */
+/** Crash-safe write: tmp file + fsync + rename so a crash never leaves half-written JSON. */
 function writeJsonCrashSafe(file: string, value: unknown): void {
   const dir = path.dirname(file);
   fs.mkdirSync(dir, { recursive: true });
   const tmp = `${file}.${process.pid}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(value, null, 2), "utf8");
+  try {
+    const fd = fs.openSync(tmp, "r");
+    try {
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    // fsync best-effort (Windows / exotic FS).
+  }
   fs.renameSync(tmp, file);
+}
+
+/** fsync a file after append so a crash doesn't lose the last turn. Best-effort. */
+function fsyncFile(file: string): void {
+  try {
+    const fd = fs.openSync(file, "r");
+    try {
+      fs.fsyncSync(fd);
+    } finally {
+      fs.closeSync(fd);
+    }
+  } catch {
+    // ignore
+  }
+}
+
+/**
+ * Cross-process file lock (Windows-safe): exclusive .lock dir creation.
+ * Returns a release fn. Contended writers retry briefly; on timeout they
+ * proceed without the lock (never deadlock the agent).
+ */
+function acquireSessionLock(id: string, home: string, timeoutMs = 2000): () => void {
+  const lockPath = path.join(sessionsDir(home), `${id}.lock`);
+  const start = Date.now();
+  for (;;) {
+    try {
+      fs.mkdirSync(lockPath);
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        try {
+          fs.rmdirSync(lockPath);
+        } catch {
+          // ignore
+        }
+      };
+    } catch {
+      if (Date.now() - start > timeoutMs) return () => undefined;
+      const end = Date.now() + 50;
+      while (Date.now() < end) {
+        // tiny busy-wait to avoid setTimeout in sync path
+      }
+    }
+  }
 }
 
 type JsonlInitLine = { v: 1; kind: "init"; record: SessionRecord };
@@ -168,6 +241,7 @@ type JsonlTurnLine = {
   model?: string;
   provider?: string;
   baseURL?: string;
+  usageAppend?: { input?: number; output?: number; costUsd?: number; cachedInput?: number };
 };
 type JsonlSaveLine = { v: 1; kind: "save"; updatedAt: string; patch: Partial<SessionRecord> };
 type JsonlRewriteLine = { v: 1; kind: "rewrite"; updatedAt: string; history: unknown[]; turnCount: number };
@@ -213,6 +287,16 @@ function replayJsonl(lines: JsonlLine[]): SessionRecord | null {
       if (line.model !== undefined) record.model = line.model;
       if (line.provider !== undefined) record.provider = line.provider;
       if (line.baseURL !== undefined) record.baseURL = line.baseURL;
+      if (line.usageAppend) {
+        const cur = record.usage ?? { input: 0, output: 0, costUsd: 0, cachedInput: 0 };
+        const num = (x: unknown): number => (typeof x === "number" && Number.isFinite(x) ? x : 0);
+        record.usage = {
+          input: cur.input + num(line.usageAppend.input),
+          output: cur.output + num(line.usageAppend.output),
+          costUsd: cur.costUsd + num(line.usageAppend.costUsd),
+          cachedInput: (cur.cachedInput ?? 0) + num(line.usageAppend.cachedInput),
+        };
+      }
       const snap: TurnSnapshot = {
         index: line.index,
         timestamp: line.timestamp,
@@ -253,6 +337,7 @@ function ensureJsonlExists(record: SessionRecord, home: string): void {
   try {
     fs.mkdirSync(path.dirname(jsonl), { recursive: true });
     fs.writeFileSync(jsonl, JSON.stringify(init) + "\n", "utf8");
+    fsyncFile(jsonl);
   } catch {
     // Best-effort: JSON snapshot below still persists.
   }
@@ -268,9 +353,10 @@ export function saveSession(
   record.checkpoints = record.checkpoints ?? [];
   record.turns = record.turns ?? [];
   const file = sessionJsonPath(record.id, home);
-  writeJsonCrashSafe(file, record);
-  ensureJsonlExists(record, home);
+  const release = acquireSessionLock(record.id, home);
   try {
+    writeJsonCrashSafe(file, record);
+    ensureJsonlExists(record, home);
     const save: JsonlSaveLine = {
       v: 1,
       kind: "save",
@@ -284,11 +370,15 @@ export function saveSession(
         modifiedFiles: record.modifiedFiles,
         checkpoints: record.checkpoints,
         turns: record.turns,
+        usage: record.usage,
       },
     };
     fs.appendFileSync(sessionJsonlPath(record.id, home), JSON.stringify(save) + "\n", "utf8");
+    fsyncFile(sessionJsonlPath(record.id, home));
   } catch {
     // Best-effort.
+  } finally {
+    release();
   }
   return file;
 }
@@ -303,6 +393,8 @@ export interface AppendTurnArgs {
   model?: string;
   provider?: string;
   baseURL?: string;
+  /** Per-turn usage delta to fold into the persisted cumulative totals. */
+  usageAppend?: { input?: number; output?: number; costUsd?: number; cachedInput?: number };
 }
 
 /**
@@ -315,7 +407,9 @@ export function appendSessionTurn(
   home: string = os.homedir(),
 ): TurnSnapshot {
   ensureJsonlExists(record, home);
-  const index = (record.turns?.length ?? 0) + 1;
+  const existing = record.turns ?? [];
+  const maxIndex = existing.reduce((m, t) => Math.max(m, t.index ?? 0), existing.length);
+  const index = Math.max(existing.length, maxIndex) + 1;
   const timestamp = new Date().toISOString();
   const historyLength = args.historyStart + args.historyAppend.length;
   const line: JsonlTurnLine = {
@@ -334,12 +428,17 @@ export function appendSessionTurn(
     model: args.model,
     provider: args.provider,
     baseURL: args.baseURL,
+    usageAppend: args.usageAppend,
   };
+  const release = acquireSessionLock(record.id, home);
   try {
     fs.mkdirSync(sessionsDir(home), { recursive: true });
     fs.appendFileSync(sessionJsonlPath(record.id, home), JSON.stringify(line) + "\n", "utf8");
+    fsyncFile(sessionJsonlPath(record.id, home));
   } catch {
     // Best-effort: in-memory state below still advances.
+  } finally {
+    release();
   }
   record.history = [...record.history, ...args.historyAppend];
   record.turnCount += 1;
@@ -359,6 +458,16 @@ export function appendSessionTurn(
   if (args.model !== undefined) record.model = args.model;
   if (args.provider !== undefined) record.provider = args.provider;
   if (args.baseURL !== undefined) record.baseURL = args.baseURL;
+  if (args.usageAppend) {
+    const cur = record.usage ?? { input: 0, output: 0, costUsd: 0, cachedInput: 0 };
+    const num = (x: unknown): number => (typeof x === "number" && Number.isFinite(x) ? x : 0);
+    record.usage = {
+      input: cur.input + num(args.usageAppend.input),
+      output: cur.output + num(args.usageAppend.output),
+      costUsd: cur.costUsd + num(args.usageAppend.costUsd),
+      cachedInput: (cur.cachedInput ?? 0) + num(args.usageAppend.cachedInput),
+    };
+  }
   const snap: TurnSnapshot = {
     index,
     timestamp,
@@ -555,6 +664,7 @@ export function rewriteSessionHistory(
   ensureJsonlExists(record, home);
   record.history = [...history];
   record.updatedAt = new Date().toISOString();
+  const release = acquireSessionLock(record.id, home);
   try {
     const line: JsonlRewriteLine = {
       v: 1,
@@ -564,9 +674,12 @@ export function rewriteSessionHistory(
       turnCount: record.turnCount,
     };
     fs.appendFileSync(sessionJsonlPath(record.id, home), JSON.stringify(line) + "\n", "utf8");
+    fsyncFile(sessionJsonlPath(record.id, home));
     writeJsonCrashSafe(sessionJsonPath(record.id, home), record);
   } catch {
     // Best-effort.
+  } finally {
+    release();
   }
 }
 

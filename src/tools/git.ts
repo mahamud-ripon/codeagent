@@ -72,6 +72,10 @@ export async function gitLog(repoRoot: string, limit = 20): Promise<string> {
 /**
  * Creates an ephemeral shadow commit snapshot under refs/codeagent/checkpoints/<id>
  * without moving HEAD or modifying the current branch or git log.
+ *
+ * Index-safe: prefers `git stash create -u` (no index mutation). Falls back
+ * to the legacy add/write-tree path with a guaranteed reset in `finally`
+ * so a crash between add and reset can't leave the workspace staged.
  */
 export async function createShadowCheckpoint(
   repoRoot: string,
@@ -79,6 +83,17 @@ export async function createShadowCheckpoint(
   label = "checkpoint",
 ): Promise<string | null> {
   if (!(await isGitRepo(repoRoot))) return null;
+  // Fast path: no index mutation at all.
+  try {
+    const stash = (await git(repoRoot, ["stash", "create", "-u"])).trim();
+    if (stash && /^[0-9a-f]{4,40}$/i.test(stash)) {
+      // stash create has no message; record the label via the ref only.
+      await git(repoRoot, ["update-ref", `refs/codeagent/checkpoints/${id}`, stash]);
+      return stash;
+    }
+  } catch {
+    // Fall through to legacy path (e.g. old git without -u support).
+  }
   try {
     // Stage all files temporarily to snapshot exact state
     await git(repoRoot, ["add", "-A"]);
@@ -94,17 +109,25 @@ export async function createShadowCheckpoint(
     }
 
     await git(repoRoot, ["update-ref", `refs/codeagent/checkpoints/${id}`, commitHash]);
-    // Reset index back to unstaged so user's workspace isn't staged
-    await git(repoRoot, ["reset"]);
     return commitHash;
   } catch (error) {
     // If checkpoint fails (e.g. index locked), fail gracefully without stopping the agent
     return null;
+  } finally {
+    // Always restore the index so a crash/error can't leave staged residue.
+    try {
+      await git(repoRoot, ["reset"]);
+    } catch {
+      // best effort
+    }
   }
 }
 
 /**
  * Restores the workspace to the exact state saved in refs/codeagent/checkpoints/<id>.
+ * Safety: snapshots the pre-restore state to a backup ref first, so a
+ * mistaken /undo never loses post-checkpoint work (Claude Code parity:
+ * stash + confirm instead of silent `clean -fd` data loss).
  */
 export async function restoreShadowCheckpoint(
   repoRoot: string,
@@ -115,6 +138,19 @@ export async function restoreShadowCheckpoint(
     const ref = `refs/codeagent/checkpoints/${id}`;
     // Verify ref exists
     await git(repoRoot, ["rev-parse", "--verify", ref]);
+    // Backup current state (including untracked) before destructive restore.
+    try {
+      const backup = (await git(repoRoot, ["stash", "create", "-u"])).trim();
+      if (backup && /^[0-9a-f]{4,40}$/i.test(backup)) {
+        await git(repoRoot, [
+          "update-ref",
+          `refs/codeagent/checkpoints/backup-${id}-${Date.now()}`,
+          backup,
+        ]);
+      }
+    } catch {
+      // backup best-effort; restore proceeds
+    }
     // Checkout all files from checkpoint
     await git(repoRoot, ["checkout", ref, "--", "."]);
     // Remove newly created untracked files

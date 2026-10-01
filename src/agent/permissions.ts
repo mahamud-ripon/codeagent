@@ -28,6 +28,19 @@ const EGRESS_PATTERNS = [
   /\bnpm\s+login\b/i,
   /\bgh\s+(auth|release|publish)\b/i,
   /\bdocker\s+push\b/i,
+  /\bpip\s+(upload|publish)\b/i,
+  /\btwine\s+upload\b/i,
+  /\bcargo\s+(publish|upload)\b/i,
+  /\baws\s+s3\b/i,
+  /\baws\s+.*\bcp\b/i,
+  /\brsync\b/i,
+  /\bnc\b/i,
+  /\bncat\b/i,
+  /\bsocat\b/i,
+  /\bftp\b/i,
+  /\btelnet\b/i,
+  /\bpython\d?\s+.*\bsocket\b/i,
+  /\bnode\b.*\bnet\.connect\b/i,
 ];
 
 export function isNetworkEgressCommand(command: string): boolean {
@@ -246,10 +259,12 @@ export class PermissionManager {
       return false;
     }
     if (this.isAutoApprove()) return true;
-    // SF-6: network-egress commands confirm in default mode. An exact
-    // session allow ("Always allow this exact command") stays silent so
+    // SF-6: network-egress commands confirm in default AND acceptEdits modes.
+    // acceptEdits auto-approves file edits, not network exfiltration (Claude
+    // Code parity: network always prompts). An exact session allow
+    // ("Always allow this exact command") stays silent so
     // allowCommand("git push") still permits "git push" handler-free.
-    if (this.mode === "default" && isNetworkEgressCommand(command)) {
+    if ((this.mode === "default" || this.mode === "acceptEdits") && isNetworkEgressCommand(command)) {
       if (this.hasExactAllow(command)) return true;
       const covered = segments.every((s) => this.segmentAllowed(s));
       if (!covered && !this.handler) return false;

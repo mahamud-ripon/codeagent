@@ -8,6 +8,7 @@ import { parseArgs } from "../src/index.js";
 import { PROMPT_VERSION } from "../src/agent/promptSections.js";
 import { Agent } from "../src/agent/agent.js";
 import type { Responder } from "../src/llm/client.js";
+import { checkExpectMatch } from "../eval/score.js";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 
@@ -53,8 +54,7 @@ describe("offline remaining gaps", () => {
   });
 });
 
-describe("no-action nudge (text-only turn with zero tool calls)", () => {
-  let tmp: string;
+describe("no-action nudge (text-only turn with zero tool calls)", () => {  let tmp: string;
   beforeEach(async () => {
     tmp = await fsp.mkdtemp(path.join(os.tmpdir(), "agent-nudge-"));
   });
@@ -102,5 +102,22 @@ describe("no-action nudge (text-only turn with zero tool calls)", () => {
     });
     const result = await agent.run("Where is the range helper implemented?");
     expect(JSON.stringify(result.history)).not.toContain("not used any tools");
+  });
+});
+
+describe("expect alternative matching (live scorer)", () => {
+  it("passes when any |-separated alternative matches", () => {
+    // Exact strings from the user-reported 33/36 run: all three "fails"
+    // had a correct alternative present in the worktree.
+    expect(checkExpectMatch("for (let i = 0; i < n; i++)", "i <= n|i < n")).toBe(true);
+    expect(checkExpectMatch("if (user === null) {", "user?|!user|user === null|user == null")).toBe(true);
+    expect(checkExpectMatch("const tax = calculateTax(n);", "function tax|calculateTax|getTax")).toBe(true);
+  });
+
+  it("still fails when no alternative matches, and matches plain expects", () => {
+    expect(checkExpectMatch("i <= m", "i <= n|i < n")).toBe(false);
+    expect(checkExpectMatch("some output", "expected")).toBe(false);
+    expect(checkExpectMatch("some expected output", "expected")).toBe(true);
+    expect(checkExpectMatch("anything", " | ")).toBe(false);
   });
 });

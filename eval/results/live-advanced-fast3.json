@@ -1,0 +1,55 @@
+{
+  "total": 3,
+  "passed": 2,
+  "passRate": 0.6666666666666666,
+  "medianTurns": 15,
+  "totalCostUsd": 0,
+  "meanSeconds": 134.07633333333334,
+  "medianTtftMs": 948,
+  "promptVersion": "codeagent-prompt/2.1",
+  "counts": {
+    "pass": 2,
+    "fail": 1,
+    "modelTimeout": 0,
+    "modelRateLimit": 0,
+    "providerError": 0
+  },
+  "effectivePassRate": 0.6666666666666666,
+  "results": [
+    {
+      "taskId": "adv-ts-extract-validate",
+      "ok": true,
+      "outcome": "TASK_PASS",
+      "turns": 12,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "seconds": 129.778,
+      "ttftMs": 948
+    },
+    {
+      "taskId": "adv-ts-event-tests",
+      "ok": true,
+      "outcome": "TASK_PASS",
+      "turns": 15,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "seconds": 174.02,
+      "ttftMs": 946
+    },
+    {
+      "taskId": "adv-ts-shared-types",
+      "ok": false,
+      "outcome": "TASK_FAIL",
+      "failureReason": "verify \"node __evalcheck.js\" exited 1: FAIL: user.js does not import types.js\n",
+      "turns": 15,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "seconds": 98.431,
+      "ttftMs": 1985
+    }
+  ],
+  "at": "2026-10-01T08:13:04.537Z"
+}

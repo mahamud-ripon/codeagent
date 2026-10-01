@@ -1,0 +1,55 @@
+{
+  "total": 3,
+  "passed": 2,
+  "passRate": 0.6666666666666666,
+  "medianTurns": 15,
+  "totalCostUsd": 0,
+  "meanSeconds": 144.46233333333336,
+  "medianTtftMs": 901,
+  "promptVersion": "codeagent-prompt/2.1",
+  "counts": {
+    "pass": 2,
+    "fail": 0,
+    "modelTimeout": 1,
+    "modelRateLimit": 0,
+    "providerError": 0
+  },
+  "effectivePassRate": 1,
+  "results": [
+    {
+      "taskId": "adv-py-retry",
+      "ok": false,
+      "outcome": "MODEL_TIMEOUT",
+      "failureReason": "Operation aborted due to timeout",
+      "turns": 15,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "seconds": 111.482,
+      "ttftMs": 889
+    },
+    {
+      "taskId": "adv-py-lru",
+      "ok": true,
+      "outcome": "TASK_PASS",
+      "turns": 15,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "seconds": 180.122,
+      "ttftMs": 901
+    },
+    {
+      "taskId": "adv-py-csvstats",
+      "ok": true,
+      "outcome": "TASK_PASS",
+      "turns": 15,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "seconds": 141.783,
+      "ttftMs": 1237
+    }
+  ],
+  "at": "2026-10-01T08:20:17.939Z"
+}

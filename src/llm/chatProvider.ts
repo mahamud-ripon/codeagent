@@ -261,35 +261,18 @@ export function extractHistorySystems(messages: Array<{ role?: string; content?:
 export async function* parseChatSse(
   stream: ReadableStream<Uint8Array> | AsyncIterable<string | Uint8Array>,
 ): AsyncGenerator<ChatStreamChunk> {
-  const textChunks: string[] = [];
-  // Same live-SSE fix as parseSseStream: Node 22 web streams async-iterate
-  // Uint8Array chunks, which String() would corrupt into "104,101,...".
   const decoder = new TextDecoder();
-  if (Symbol.asyncIterator in Object(stream)) {
-    for await (const part of stream as AsyncIterable<string | Uint8Array>) {
-      textChunks.push(typeof part === "string" ? part : decoder.decode(part, { stream: true }));
-    }
-    textChunks.push(decoder.decode());
-  } else {
-    const reader = (stream as ReadableStream<Uint8Array>).getReader();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      textChunks.push(decoder.decode(value, { stream: true }));
-    }
-    textChunks.push(decoder.decode());
-  }
-  const raw = textChunks.join("");
-  for (const block of raw.split(/\n\n+/)) {
+  let buffer = "";
+  const parseBlock = function* (block: string): Generator<ChatStreamChunk> {
     const dataLines: string[] = [];
     let isErrorEvent = false;
     for (const line of block.split("\n")) {
       if (line.startsWith("event:") && line.slice(6).trim() === "error") isErrorEvent = true;
       if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
     }
-    if (dataLines.length === 0) continue;
+    if (dataLines.length === 0) return;
     const dataRaw = dataLines.join("\n");
-    if (dataRaw === "[DONE]") continue;
+    if (dataRaw === "[DONE]") return;
     try {
       const parsed = JSON.parse(dataRaw) as ChatStreamChunk & { error?: { message?: string } };
       if (isErrorEvent || parsed.error) {
@@ -301,6 +284,39 @@ export async function* parseChatSse(
       if (e instanceof Error && e.message.startsWith("Chat upstream error:")) throw e;
       // Truncated JSON frame — same fault-injection tolerance as other adapters.
     }
+  };
+  const drainComplete = function* (): Generator<ChatStreamChunk> {
+    let idx: number;
+    while ((idx = buffer.search(/\n\n/)) !== -1) {
+      const block = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      yield* parseBlock(block);
+    }
+  };
+  // Same live-SSE fix as parseSseStream: Node 22 web streams async-iterate
+  // Uint8Array chunks, which String() would corrupt into "104,101,...".
+  if (Symbol.asyncIterator in Object(stream)) {
+    for await (const part of stream as AsyncIterable<string | Uint8Array>) {
+      buffer += typeof part === "string" ? part : decoder.decode(part, { stream: true });
+      yield* drainComplete();
+    }
+    buffer += decoder.decode();
+  } else {
+    const reader = (stream as ReadableStream<Uint8Array>).getReader();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        yield* drainComplete();
+      }
+      buffer += decoder.decode();
+    } finally {
+      reader.releaseLock();
+    }
+  }
+  if (buffer.trim()) {
+    yield* parseBlock(buffer);
   }
 }
 
@@ -358,6 +374,8 @@ export function createChatStreamProvider(opts: ChatStreamOptions): Provider {
           }
           return r;
         }),
+        // Inner layer: initial fetch POST only (outer retries whole stream).
+        { signal: req.signal, maxAttempts: 2 },
       );
       if (!res.body) throw new Error("Chat stream had no body.");
       yield* streamChatChunks(parseChatSse(res.body as ReadableStream<Uint8Array>));
@@ -380,13 +398,15 @@ export function createChatResponder(
     const messages: ChatMessage[] = [...(head ? [{ role: "system", content: head } as ChatMessage] : []), ...rest];
 
     const useTools = options?.tools ?? true;
-    const created = await withProviderRetry(() =>
-      client.chat.completions.create({
-        model: args.model,
-        messages,
-        stream: true,
-        ...(useTools ? { tools: toChatTools() as unknown as ChatTool[] } : {}),
-      }),
+    const created = await withProviderRetry(
+      () =>
+        client.chat.completions.create({
+          model: args.model,
+          messages,
+          stream: true,
+          ...(useTools ? { tools: toChatTools() as unknown as ChatTool[] } : {}),
+        }),
+      { signal: options?.signal, maxAttempts: 2 },
     );
     if (isAsyncIterable(created)) {
       return collectProviderEvents(streamChatChunks(created));

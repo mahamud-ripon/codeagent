@@ -135,6 +135,8 @@ export function createResponsesStreamProvider(opts: ResponsesStreamOptions): Pro
           }
           return r;
         }),
+        // Inner layer only (outer retries whole stream): bound total to 2×3.
+        { signal: req.signal, maxAttempts: 2 },
       );
       if (!res.body) throw new Error("Responses stream had no body.");
       yield* streamResponsesSse(parseSseStream(res.body as ReadableStream<Uint8Array>));

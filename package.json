@@ -1,6 +1,6 @@
 {
   "name": "@mahamud-ripon/codeagent",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "CLI-first autonomous coding agent",
   "license": "MIT",
   "repository": {

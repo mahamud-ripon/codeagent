@@ -32,7 +32,10 @@ export function isAuthError(message: string): boolean {
 }
 
 export function isRateLimitError(message: string): boolean {
-  return /429|413|rate.?limit|too many requests|tokens per minute|\bTPM\b|\bRPD\b|overloaded|capacity/i.test(
+  // Note: 413 (request-too-large) is handled by compaction, not backoff;
+  // bare "capacity" false-positives on "model capacity 128k" — require
+  // overload phrasing instead.
+  return /429|rate.?limit|too many requests|tokens per minute|\bTPM\b|\bRPD\b|overloaded|no available workers|circuits open/i.test(
     message,
   );
 }
@@ -76,7 +79,8 @@ export function isRetryableProviderError(error: unknown): boolean {
   const status = errorStatus(error);
   if (status === 429) return true;
   if (status !== undefined && status >= 500 && status < 600) return true;
-  if (status === 408 || status === 413) return true;
+  if (status === 408) return true;
+  // 413 compacts (agent.ts), never backs off — excluded here too.
   if (status !== undefined && status >= 400 && status < 500) return false;
   if (isRateLimitError(message)) return true;
   return /timeout|timed out|econnreset|econnrefused|enotfound|eai_again|socket hang up|network|fetch failed|truncated|unexpected end|service unavailable|bad gateway|gateway timeout|no_available_workers|no available workers|circuits open/i.test(
@@ -98,6 +102,16 @@ export function parseRetryAfterMs(value: string | null | undefined, nowMs = Date
 /** Pull `Retry-After` (ms) off an SDK-style error, if present. */
 export function retryAfterMsFromError(error: unknown): number | undefined {
   if (typeof error !== "object" || error === null) return undefined;
+  const fromMessage = /retry.after[^0-9]*(\d+)\s*(ms|msec|millis|s|sec|second|m|min)?/i.exec(errorMessage(error));
+  if (fromMessage) {
+    const n = Number(fromMessage[1]);
+    if (Number.isFinite(n)) {
+      const unit = (fromMessage[2] ?? "s").toLowerCase();
+      if (unit.startsWith("ms") || unit.startsWith("millis")) return n;
+      if (unit.startsWith("m")) return n * 60_000;
+      return n * 1000;
+    }
+  }
   const e = error as ErrorLike;
   const headers = [e.headers, e.response?.headers];
   for (const h of headers) {
@@ -126,7 +140,9 @@ export function retryAfterMsFromError(error: unknown): number | undefined {
 
 /**
  * Exponential backoff with full jitter: wait = random(0, min(cap, base * 2^attempt)).
- * A server `Retry-After` raises the ceiling instead of being ignored.
+ * A server `Retry-After` raises the ceiling instead of being ignored (Claude
+ * Code parity: honor full Retry-After up to 5m, don't truncate to 15-30s
+ * and hammer a limited endpoint).
  */
 export function retryDelayMs(
   attempt: number,
@@ -139,8 +155,22 @@ export function retryDelayMs(
   return Math.floor(random() * ceiling);
 }
 
-function defaultSleep(ms: number): Promise<void> {
-  return new Promise<void>((resolve) => setTimeout(resolve, ms));
+/** Server-directed wait cap: Retry-After wins up to 5 minutes. */
+export const SERVER_RETRY_AFTER_CAP_MS = 300_000;
+
+function defaultSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new Error("Provider request cancelled (AbortSignal)."));
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      reject(new Error("Provider request cancelled (AbortSignal)."));
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /**
@@ -154,7 +184,7 @@ export async function withProviderRetry<T>(
   const maxAttempts = Math.max(1, opts.maxAttempts ?? 4);
   const baseMs = opts.baseMs ?? 1000;
   const maxMs = opts.maxMs ?? 30_000;
-  const sleep = opts.sleep ?? defaultSleep;
+  const sleep = opts.sleep ?? ((ms: number) => defaultSleep(ms, opts.signal));
   const random = opts.random ?? Math.random;
 
   let attempt = 0;
@@ -168,11 +198,11 @@ export async function withProviderRetry<T>(
       const retryable = isRetryableProviderError(error);
       if (!retryable || attempt >= maxAttempts) throw error;
       const serverWait = retryAfterMsFromError(error);
-      // Retry-After wins when it exceeds the jittered backoff; still capped.
-      const waitMs = Math.min(
-        maxMs,
-        Math.max(retryDelayMs(attempt, baseMs, maxMs, undefined, random), Math.min(serverWait ?? 0, maxMs)),
-      );
+      // Single-layer policy: jittered backoff capped at maxMs, but an
+      // explicit server Retry-After wins up to 5m (never truncate 120s→15s).
+      const jittered = retryDelayMs(attempt, baseMs, maxMs, undefined, random);
+      const honored = Math.min(serverWait ?? 0, SERVER_RETRY_AFTER_CAP_MS);
+      const waitMs = Math.max(jittered, honored);
       opts.onRetry?.(attempt, waitMs, message);
       await sleep(waitMs);
     }

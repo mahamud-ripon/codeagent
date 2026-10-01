@@ -21,6 +21,25 @@ import { ConsoleAgentReporter, formatMarkdown, pc } from "./cli/ui/index.js";
 // The global file fills whatever is still unset: configure once.
 loadGlobalEnv();
 
+// Production crash guards (Claude Code/Codex parity): never let a stray
+// rejection or sync throw kill the process without a message. REPL stays
+// alive; headless exits 1 with a clear error instead of a stack dump.
+let crashGuardsInstalled = false;
+export function installCrashGuards(): void {
+  if (crashGuardsInstalled) return;
+  crashGuardsInstalled = true;
+  process.on("unhandledRejection", (reason) => {
+    const msg = reason instanceof Error ? reason.message : String(reason);
+    console.error(`codeagent: unhandled async error (session preserved): ${msg}`);
+  });
+  process.on("uncaughtException", (error) => {
+    console.error(`codeagent failed: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(1);
+  });
+}
+
+installCrashGuards();
+
 /**
  * CLI keeps zero agent logic: parse args -> configure Agent -> run -> print.
  * The same Agent class will later back a VS Code extension via an

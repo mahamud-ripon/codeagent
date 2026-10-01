@@ -41,8 +41,8 @@ export interface AgentOptions extends AgentConfig {
   responder?: Responder;
   /** Optional verbose logging (default true). */
   verbose?: boolean;
-  /** Injectable clock for tests (default: real setTimeout). */
-  sleep?: (ms: number) => Promise<void>;
+  /** Injectable clock for tests (default: real setTimeout). Abort-aware. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   /** Permission manager for commands and destructive actions. */
   permissions?: PermissionManager;
   /** Optional visual progress reporter (spinners, tool cards). */
@@ -86,6 +86,13 @@ export interface AgentOptions extends AgentConfig {
   hooks?: import("./hooks.js").HookConfig;
   /** Model roles (ML-5): main/fast/plan for per-mode routing. */
   modelRoles?: ModelRoles;
+  /**
+   * Per-agent command runner + sandbox mode (Claude Code parity: no global
+   * race when concurrent runs use different modes). Falls back to the
+   * global active runner when absent (tests/legacy callers).
+   */
+  commandRunner?: import("../tools/runner.js").CommandRunner;
+  sandboxMode?: "local" | "docker";
   /** Plan-model responder: used for the main loop while plan mode is active. */
   planResponder?: Responder;
   /** Force small-model mode regardless of model id (ML-4 setting). */
@@ -212,6 +219,10 @@ export class Agent {
     }
     const { collectStreamingWithEmit } = await import("../llm/collectStream.js");
     const { withProviderRetry } = await import("../llm/retry.js");
+    // Single retry layer for whole-stream failures (mid-stream truncation,
+    // empty stream). Provider adapters retry only the initial fetch POST
+    // (maxAttempts 2); this outer layer retries the collapsed stream.
+    // Total bounded at 2×3=6 attempts, Retry-After honored up to 5m.
     return withProviderRetry(
       () =>
         collectStreamingWithEmit(
@@ -221,7 +232,7 @@ export class Agent {
         ),
       {
         signal: opts?.signal,
-        maxAttempts: 4,
+        maxAttempts: 3,
         baseMs: 1500,
         maxMs: 15_000,
         onRetry: (attempt, waitMs, msg) => {
@@ -384,7 +395,21 @@ export class Agent {
     let stopHookRetries = 0;
     let lastModelOutputText = "";
     const MAX_STOP_HOOK_RETRIES = 2;
-    const sleep = this.options.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    const sleep = this.options.sleep ?? ((ms: number, sig?: AbortSignal) => {
+      const signalToWatch = sig ?? signal;
+      if (signalToWatch?.aborted) return Promise.reject(new Error("Agent run cancelled by user (AbortSignal)."));
+      return new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          signalToWatch?.removeEventListener("abort", onAbort);
+          resolve();
+        }, ms);
+        const onAbort = (): void => {
+          clearTimeout(timer);
+          reject(new Error("Agent run cancelled by user (AbortSignal)."));
+        };
+        signalToWatch?.addEventListener("abort", onAbort, { once: true });
+      });
+    });
 
     for (let i = 0; i < maxIterations; i++) {
       this.checkCancelled(signal);
@@ -490,7 +515,7 @@ export class Agent {
           } else {
             this.log(`Rate limited. Waiting ${waitMs / 1000}s before retry ${rateLimitRetries}... (Ctrl+C cancels)`);
           }
-          await sleep(waitMs);
+          await sleep(waitMs, signal);
           this.checkCancelled(signal);
           continue;
         }
@@ -728,7 +753,8 @@ export class Agent {
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
               state.errors.push(message);
-              // Fall through and return — verification tooling itself failed.
+              // Verification tooling failed — never present as verified.
+              finalText += `\n\n[Verification skipped: diff review unavailable (${message.slice(0, 200)})]`;
             }
           }
         }
@@ -907,14 +933,14 @@ export class Agent {
           }
         }
         // EX-1: MCP tools (mcp__server__tool) get per-tool permission checks.
+        // Fail closed when no checker is present (Claude Code parity).
         if (name.startsWith("mcp__")) {
           const { parseNamespacedTool } = await import("../mcp/client.js");
           const parsed = parseNamespacedTool(name);
           const server = parsed?.server ?? "unknown";
           const tool = parsed?.tool ?? name;
-          const allowedMcp = await (this.permissions as unknown as { checkMcp?: (s: string, t: string) => Promise<boolean> }).checkMcp
-            ? await (this.permissions as unknown as { checkMcp: (s: string, t: string) => Promise<boolean> }).checkMcp(server, tool)
-            : true;
+          const checker = (this.permissions as unknown as { checkMcp?: (s: string, t: string) => Promise<boolean> }).checkMcp;
+          const allowedMcp = checker ? await checker.call(this.permissions, server, tool) : false;
           if (!allowedMcp) {
             lastDenied = true;
             logAudit(repoRoot, { kind: "permission", tool: name, args, decision: "deny", detail: "mcp denied" });
@@ -946,6 +972,8 @@ export class Agent {
             providerOverrides: this.providerOverrides,
             planApprover: this.options.planApprover,
             hooks: this.options.hooks,
+            commandRunner: this.options.commandRunner,
+            sandboxMode: this.options.sandboxMode,
             // AG-14: stream spawn chunks as tool_output_delta events.
             onToolOutputDelta: (chunk: string) => this.emit({ type: "tool_output_delta", id: callId, chunk }),
           });
@@ -996,10 +1024,12 @@ export class Agent {
           ms: toolDuration,
           detail: toolOutput.slice(0, 300),
         });
+        // Always cap before reporter/history/audit — the TUI path previously
+        // pushed unbounded output into context (2M maxBuffer blowup).
+        toolOutput = truncate(toolOutput, MAX_TOOL_OUTPUT_CHARS);
         if (this.reporter) {
           this.reporter.onToolComplete(name, args, toolOutput, success, toolDuration);
         } else {
-          toolOutput = truncate(toolOutput, MAX_TOOL_OUTPUT_CHARS);
           if (success) this.log(toolOutput.slice(0, 1000));
           else this.log(toolOutput);
         }

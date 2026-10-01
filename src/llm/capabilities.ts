@@ -20,6 +20,18 @@ export const CONSERVATIVE_CAPABILITIES: ModelCapabilities = {
 
 const REGISTRY: Array<{ match: RegExp; caps: ModelCapabilities }> = [
   {
+    match: /opus\s*5|claude-5|claude-opus-4\.[5-9]|claude-opus-4/i,
+    caps: {
+      contextWindow: 200_000,
+      maxOutput: 32_768,
+      tools: true,
+      reasoning: true,
+      caching: true,
+      inputPricePerMtok: 5,
+      outputPricePerMtok: 25,
+    },
+  },
+  {
     match: /claude-opus|claude-sonnet-4|claude-3-5-sonnet|claude-3-7/i,
     caps: {
       contextWindow: 200_000,
@@ -44,6 +56,18 @@ const REGISTRY: Array<{ match: RegExp; caps: ModelCapabilities }> = [
     },
   },
   {
+    match: /gpt-5\.5|gpt-5\.3-codex|gpt-5\.3|gpt-5\.6-luna|codex/i,
+    caps: {
+      contextWindow: 400_000,
+      maxOutput: 32_768,
+      tools: true,
+      reasoning: true,
+      caching: true,
+      inputPricePerMtok: 2,
+      outputPricePerMtok: 8,
+    },
+  },
+  {
     match: /gpt-4o|gpt-4\.1|gpt-5/i,
     caps: {
       contextWindow: 128_000,
@@ -56,19 +80,31 @@ const REGISTRY: Array<{ match: RegExp; caps: ModelCapabilities }> = [
     },
   },
   {
-    match: /gemini/i,
+    match: /gemini\s*3|gemini-3|gemini/i,
     caps: {
       contextWindow: 1_000_000,
-      maxOutput: 8_192,
+      maxOutput: 16_384,
       tools: true,
-      reasoning: false,
-      caching: false,
-      inputPricePerMtok: 0.15,
-      outputPricePerMtok: 0.6,
+      reasoning: true,
+      caching: true,
+      inputPricePerMtok: 0.3,
+      outputPricePerMtok: 1.2,
     },
   },
   {
-    match: /ollama|llama|qwen|gpt-oss/i,
+    match: /qwen3|qwen-3|qwen2\.5|qwen/i,
+    caps: {
+      contextWindow: 128_000,
+      maxOutput: 8_192,
+      tools: true,
+      reasoning: true,
+      caching: false,
+      inputPricePerMtok: 0.2,
+      outputPricePerMtok: 0.8,
+    },
+  },
+  {
+    match: /ollama|llama|gpt-oss/i,
     caps: {
       contextWindow: 32_768,
       maxOutput: 4_096,

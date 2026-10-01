@@ -1,0 +1,55 @@
+{
+  "total": 3,
+  "passed": 2,
+  "passRate": 0.6666666666666666,
+  "medianTurns": 15,
+  "totalCostUsd": 0,
+  "meanSeconds": 138.62366666666665,
+  "medianTtftMs": 1412,
+  "promptVersion": "codeagent-prompt/2.1",
+  "counts": {
+    "pass": 2,
+    "fail": 1,
+    "modelTimeout": 0,
+    "modelRateLimit": 0,
+    "providerError": 0
+  },
+  "effectivePassRate": 0.6666666666666666,
+  "results": [
+    {
+      "taskId": "adv-ts-rename-chain",
+      "ok": true,
+      "outcome": "TASK_PASS",
+      "turns": 15,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "seconds": 71.64,
+      "ttftMs": 1762
+    },
+    {
+      "taskId": "adv-ts-import-cycle",
+      "ok": true,
+      "outcome": "TASK_PASS",
+      "turns": 15,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "seconds": 164.105,
+      "ttftMs": 1027
+    },
+    {
+      "taskId": "adv-ts-middleware",
+      "ok": false,
+      "outcome": "TASK_FAIL",
+      "failureReason": "verify \"node __evalcheck.js\" exited 1: FAIL: error middleware broken: {\"statusCode\":200,\"body\":\"hello\"}\n",
+      "turns": 15,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "seconds": 180.126,
+      "ttftMs": 1412
+    }
+  ],
+  "at": "2026-10-01T07:59:42.713Z"
+}

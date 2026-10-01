@@ -139,44 +139,60 @@ function toAnthropicMessages(input: unknown[]): Array<{ role: string; content: u
     });
 }
 
-/** Parse an SSE byte stream into JSON payloads (used by Anthropic/Gemini/Responses). */
+/** Parse an SSE byte stream into JSON payloads (used by Anthropic/Gemini/Responses). Incremental: yields each complete block as it arrives instead of buffering the whole stream (TTFT + OOM fix). */
 export async function* parseSseStream(stream: ReadableStream<Uint8Array> | AsyncIterable<string | Uint8Array>): AsyncGenerator<{ event: string; data: unknown }> {
-  const textChunks: string[] = [];
-  // Node 22 web streams expose Symbol.asyncIterator yielding Uint8Array
-  // chunks — String(chunk) would emit "104,101,..." and silently drop every
-  // frame, so byte chunks must go through TextDecoder (live-SSE fix).
   const decoder = new TextDecoder();
-  if (Symbol.asyncIterator in Object(stream)) {
-    for await (const part of stream as AsyncIterable<string | Uint8Array>) {
-      textChunks.push(typeof part === "string" ? part : decoder.decode(part, { stream: true }));
-    }
-    textChunks.push(decoder.decode());
-  } else {
-    const reader = (stream as ReadableStream<Uint8Array>).getReader();
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      textChunks.push(decoder.decode(value, { stream: true }));
-    }
-    textChunks.push(decoder.decode());
-  }
-  const raw = textChunks.join("");
-  const blocks = raw.split(/\n\n+/);
-  for (const block of blocks) {
+  let buffer = "";
+  const parseBlock = function* (block: string): Generator<{ event: string; data: unknown }> {
     let event = "message";
     const dataLines: string[] = [];
     for (const line of block.split("\n")) {
       if (line.startsWith("event:")) event = line.slice(6).trim();
       else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
     }
-    if (dataLines.length === 0) continue;
+    if (dataLines.length === 0) return;
     const dataRaw = dataLines.join("\n");
-    if (dataRaw === "[DONE]") continue;
+    if (dataRaw === "[DONE]") return;
     try {
       yield { event, data: JSON.parse(dataRaw) };
     } catch {
       // Truncated JSON in a stream is a fault-injection case; skip the frame.
     }
+  };
+  const drainComplete = function* (): Generator<{ event: string; data: unknown }> {
+    let idx: number;
+    while ((idx = buffer.search(/\n\n/)) !== -1) {
+      const block = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+      yield* parseBlock(block);
+    }
+  };
+  // Node 22 web streams expose Symbol.asyncIterator yielding Uint8Array
+  // chunks — String(chunk) would emit "104,101,..." and silently drop every
+  // frame, so byte chunks must go through TextDecoder (live-SSE fix).
+  if (Symbol.asyncIterator in Object(stream)) {
+    for await (const part of stream as AsyncIterable<string | Uint8Array>) {
+      buffer += typeof part === "string" ? part : decoder.decode(part, { stream: true });
+      yield* drainComplete();
+    }
+    buffer += decoder.decode();
+  } else {
+    const reader = (stream as ReadableStream<Uint8Array>).getReader();
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        yield* drainComplete();
+      }
+      buffer += decoder.decode();
+    } finally {
+      reader.releaseLock();
+    }
+  }
+  if (buffer.trim()) {
+    yield* parseBlock(buffer);
+    buffer = "";
   }
 }
 
@@ -238,6 +254,8 @@ export function createAnthropicProvider(opts: AnthropicProviderOptions): Provide
           }
           return r;
         }),
+        // Inner layer only (outer retries whole stream): bound total to 2×3.
+        { signal: req.signal, maxAttempts: 2 },
       );
       if (!res.body) throw new Error("Anthropic stream had no body.");
       const tools = new Map<number, ToolAcc>();

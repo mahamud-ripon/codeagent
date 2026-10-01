@@ -55,7 +55,18 @@ export async function collectStreamingWithEmit(
 
   if (text) output.push({ type: "message", content: text });
   for (const [id, call] of calls) {
+    // Mid-stream cut leaves a start+delta with no end and truncated JSON.
+    // Never emit corrupt arguments downstream (JSON.parse fail → no-op loop);
+    // throw retryable instead so the outer withProviderRetry retries intact.
+    try {
+      if (call.arguments.trim()) JSON.parse(call.arguments);
+    } catch {
+      throw new Error(`Chat stream truncated mid-tool-call (${call.name}); retryable`);
+    }
     output.push({ type: "function_call", call_id: id, name: call.name, arguments: call.arguments });
+  }
+  if (output.length === 0 && finishReason === undefined) {
+    throw new Error("Chat stream ended with no output (truncated); retryable");
   }
   return {
     output,

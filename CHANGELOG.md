@@ -2,6 +2,24 @@
 
 All notable changes to CodeAgent. Format follows Keep a Changelog; versioning follows SemVer.
 
+## [0.8.0] — 2026-09-30 (advanced benchmark suite: 20 hard tasks with hidden verify)
+
+The base suite (36 basic tasks, substring-scored) could not separate strong agents from lucky ones. New hard-task suite where every task must also pass a behavioral check the agent can never see.
+
+### Runner (`eval/live.ts`, backward compatible)
+- `EVAL_TASKS_FILE` selects the suite (`tasks.json` default); results go to `eval/results/live-<stem>.json` (+ chunk files), so the base baseline is never clobbered.
+- Optional per-task `verify: { file, content, run, expectOut? }`: the check script is written into the throwaway repo only after the agent finishes, executed (90 s cap), then deleted before scoring — pass requires exit 0 (+ output match). `failureReason` reports verify failures distinctly.
+- Optional per-task `timeoutSec` / `maxIterations` overrides (defaults 180 s / 15 it).
+
+### Suite (`eval/tasks-advanced.json`, 20 tasks: 9 TS, 7 Python, 4 Go)
+- Multi-file chains (rename across 4 files incl. vendored restraint check), import-cycle breaking, middleware/emitter/pagination/config-merge features, validation extraction, shared-type dedup, executable `node:assert` test-writing, retry/LRU/CSV/shadowing/dataclass/plugin/migration Python tasks (all executed), Go worker-pool/errwrap/rename/limiter with hidden `go test` checks and in-repo `go.mod`.
+- Verification battery (all green before shipping): JSON schema test (`tests/advancedTasks.test.ts`: suite shape, cross-suite id uniqueness, expect-absent-from-broken-files gate), toolchain syntax on every file (`node --check`, `py_compile`, `gofmt`), every verify script confirmed to FAIL on the broken files (caught 3 live bugs pre-ship: Go `_`-prefix test files ignored by the toolchain, an LRU check that coincided with the bug, a fixed `expect` trio), and reference trial-solves of pool/limiter/retry/LRU.
+- Pilot on `nvidia/nemotron-3-ultra-550b-a55b`: `adv-py-lru` pass (7 turns); `adv-ts-emitter` failed on a wrong check assertion (mid-emit removal expectation inverted) — fixed and re-ran green (15 turns). The pilot process works: red → fix → green.
+
+Prerequisites for live advanced runs: `node`, `python`, and `go` toolchains on PATH (verify scripts execute real code). Usage: `EVAL_LIVE=1 EVAL_TASKS_FILE=tasks-advanced.json npm run eval:live` (+ `EVAL_TASKS`/`EVAL_CHUNK` selection as usual).
+
+Suite total is now 361 across 35 files. Still open: full 20-task advanced baseline numbers; merged base `live.json` re-run; green GitHub CI run; npm publish; Docker-daemon test; 3-real-server MCP verification; live red-team.
+
 ## [0.7.0] — 2026-09-30 (live-verification slice: first measured baseline + streaming/loop fixes)
 
 First endpoint-backed slice. Three live-found bugs fixed (all with regression tests); first 36-task live baseline recorded; usage accounting corrected for future runs.

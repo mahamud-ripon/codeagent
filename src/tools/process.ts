@@ -29,15 +29,47 @@ export function getBgJob(id: string): BgJob | undefined {
 
 function killTree(proc: ChildProcess | undefined): void {
   if (!proc || proc.exitCode !== null || proc.signalCode !== null) return;
+  if (proc.pid === undefined) return;
   try {
     if (process.platform === "win32") {
-      spawn("taskkill", ["/pid", String(proc.pid), "/t", "/f"]);
+      const killer = spawn("taskkill", ["/pid", String(proc.pid), "/t", "/f"]);
+      killer.on("error", () => undefined);
+      killer.unref?.();
     } else {
-      try { process.kill(-(proc.pid ?? 0), "SIGKILL"); } catch { proc.kill("SIGKILL"); }
+      try { process.kill(-proc.pid, "SIGKILL"); } catch { proc.kill("SIGKILL"); }
     }
   } catch {
     try { proc.kill("SIGKILL"); } catch { /* best effort */ }
   }
+}
+
+const MAX_JOB_OUTPUT_CHARS = 256_000;
+const MAX_BG_JOBS = 20;
+
+function appendCapped(current: string, chunk: string): string {
+  const next = current + chunk;
+  if (next.length <= MAX_JOB_OUTPUT_CHARS) return next;
+  return next.slice(next.length - MAX_JOB_OUTPUT_CHARS);
+}
+
+function evictOldJobs(): void {
+  if (jobs.size < MAX_BG_JOBS) return;
+  for (const [id, job] of jobs) {
+    if (job.done) {
+      jobs.delete(id);
+      if (jobs.size < MAX_BG_JOBS) return;
+    }
+  }
+  // All running: drop oldest by startedAt to bound memory.
+  let oldest: string | null = null;
+  let oldestAt = Infinity;
+  for (const [id, job] of jobs) {
+    if (job.startedAt < oldestAt) {
+      oldestAt = job.startedAt;
+      oldest = id;
+    }
+  }
+  if (oldest) jobs.delete(oldest);
 }
 
 export interface SpawnRunOptions {
@@ -67,28 +99,59 @@ export function runSpawn(
     const job: BgJob = { id, command, output: "", done: false, startedAt: Date.now() };
     const proc = spawn(shell, shellArgs, { ...spawnOpts, detached: !isWin });
     job.proc = proc;
-    proc.stdout?.on("data", (d: Buffer) => { job.output += d.toString(); opts.onChunk?.(d.toString()); });
-    proc.stderr?.on("data", (d: Buffer) => { job.output += d.toString(); opts.onChunk?.(d.toString()); });
+    proc.stdout?.on("data", (d: Buffer) => { job.output = appendCapped(job.output, d.toString()); opts.onChunk?.(d.toString()); });
+    proc.stderr?.on("data", (d: Buffer) => { job.output = appendCapped(job.output, d.toString()); opts.onChunk?.(d.toString()); });
     proc.on("close", (code) => { job.done = true; job.exitCode = code ?? 1; });
-    proc.on("error", (e) => { job.done = true; job.output += `\n[spawn error: ${(e as Error).message}]`; });
-    if (opts.signal) opts.signal.addEventListener("abort", () => killTree(proc), { once: true });
+    proc.on("error", (e) => { job.done = true; job.output = appendCapped(job.output, `\n[spawn error: ${(e as Error).message}]`); });
+    if (opts.signal) {
+      if (opts.signal.aborted) killTree(proc);
+      else opts.signal.addEventListener("abort", () => killTree(proc), { once: true });
+    }
+    evictOldJobs();
     jobs.set(id, job);
     return Promise.resolve({ jobId: id, output: `Started background job ${id}: ${command}`, exitCode: 0 });
   }
 
   return new Promise((resolve, reject) => {
-    const proc = spawn(shell, shellArgs, spawnOpts);
+    const proc = spawn(shell, shellArgs, { ...spawnOpts, detached: !isWin });
     let output = "";
+    let settled = false;
+    const cleanup = (): void => {
+      clearTimeout(timer);
+      opts.signal?.removeEventListener("abort", onAbort);
+    };
+    const onAbort = (): void => {
+      killTree(proc);
+      if (!settled) {
+        settled = true;
+        cleanup();
+        reject(new Error("Provider request cancelled (AbortSignal)."));
+      }
+    };
     const timer = setTimeout(() => {
       killTree(proc);
-      reject(new Error(`Command timed out after ${timeoutMs / 1000}s: ${command}`));
+      if (!settled) {
+        settled = true;
+        opts.signal?.removeEventListener("abort", onAbort);
+        reject(new Error(`Command timed out after ${timeoutMs / 1000}s: ${command}`));
+      }
     }, timeoutMs);
-    if (opts.signal) opts.signal.addEventListener("abort", () => { killTree(proc); }, { once: true });
-    proc.stdout?.on("data", (d: Buffer) => { const s = d.toString(); output += s; opts.onChunk?.(s); });
-    proc.stderr?.on("data", (d: Buffer) => { const s = d.toString(); output += s; opts.onChunk?.(s); });
-    proc.on("error", (e) => { clearTimeout(timer); reject(new Error(`Command failed: ${(e as Error).message}`)); });
+    if (opts.signal) {
+      if (opts.signal.aborted) onAbort();
+      else opts.signal.addEventListener("abort", onAbort, { once: true });
+    }
+    proc.stdout?.on("data", (d: Buffer) => { const s = d.toString(); output = appendCapped(output, s); opts.onChunk?.(s); });
+    proc.stderr?.on("data", (d: Buffer) => { const s = d.toString(); output = appendCapped(output, s); opts.onChunk?.(s); });
+    proc.on("error", (e) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error(`Command failed: ${(e as Error).message}`));
+    });
     proc.on("close", (code) => {
-      clearTimeout(timer);
+      if (settled) return;
+      settled = true;
+      cleanup();
       resolve({ output: `exit code: ${code ?? 1}\n${output}`.trim(), exitCode: code ?? 1 });
     });
   });

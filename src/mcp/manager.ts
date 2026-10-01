@@ -5,6 +5,13 @@ import { McpClient, type McpServerConfig, type McpToolDef } from "./client.js";
 
 /** EX-1 manager: config in settings.json mcpServers + codeagent mcp add/list/remove. */
 
+/** Non-fatal warnings surfaced to /mcp instead of silent skips. */
+export const mcpConfigWarnings: string[] = [];
+
+export function consumeMcpWarnings(): string[] {
+  return mcpConfigWarnings.splice(0, mcpConfigWarnings.length);
+}
+
 export async function loadMcpServers(repoRoot: string, homeDir: string = os.homedir()): Promise<Record<string, McpServerConfig>> {
   const files = [
     path.join(homeDir, ".codeagent", "settings.json"),
@@ -15,8 +22,11 @@ export async function loadMcpServers(repoRoot: string, homeDir: string = os.home
     try {
       const raw = JSON.parse(await fs.readFile(file, "utf8")) as { mcpServers?: Record<string, McpServerConfig> };
       Object.assign(merged, raw.mcpServers ?? {});
-    } catch {
-      // missing/unparseable — skip
+    } catch (e) {
+      // ENOENT (missing file) is fine; corrupt JSON must surface, not vanish.
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") {
+        mcpConfigWarnings.push(`MCP config ${file}: ${(e as Error).message}`);
+      }
     }
   }
   return merged;
@@ -30,8 +40,9 @@ export async function listAllMcpTools(repoRoot: string): Promise<McpToolDef[]> {
     try {
       client = cfg.url ? await McpClient.http(name, cfg) : await McpClient.stdio(name, cfg);
       out.push(...(await client.listTools(name)));
-    } catch {
-      // unreachable server — skip, do not fail the run
+    } catch (e) {
+      // Unreachable server — record which/why instead of silent empty list.
+      mcpConfigWarnings.push(`MCP server "${name}" unreachable: ${(e as Error).message}`);
     } finally {
       await client?.close().catch(() => undefined);
     }

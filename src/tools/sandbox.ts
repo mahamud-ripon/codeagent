@@ -61,7 +61,12 @@ export class DockerCommandRunner implements CommandRunner {
   async run(repoRoot: string, command: string, signal?: AbortSignal): Promise<CommandResult> {
     const available = await this.isDockerAvailable();
     if (!available) {
-      return this.fallback.run(repoRoot, command, signal);
+      const fallback = await this.fallback.run(repoRoot, command, signal);
+      const notice = "[sandbox: Docker unavailable, ran on local host — treat output as untrusted]";
+      return {
+        ...fallback,
+        combined: `${notice}\n${fallback.combined}`,
+      };
     }
 
     // Prepare workspace mount path
@@ -73,6 +78,11 @@ export class DockerCommandRunner implements CommandRunner {
       "run",
       "--rm",
       "-i",
+      "--network=none",
+      "--cap-drop=ALL",
+      "--pids-limit=256",
+      "--user",
+      "node",
       "-v",
       `${mountPath}:/workspace`,
       "-w",
@@ -121,13 +131,39 @@ export class DockerCommandRunner implements CommandRunner {
         };
       }
       // If docker run completely failed (e.g. daemon stopped mid-session), fall back
-      return this.fallback.run(repoRoot, command, signal);
+      // explicitly so the agent knows isolation was lost (never silent).
+      const fallback = await this.fallback.run(repoRoot, command, signal);
+      const notice = `[sandbox: Docker run failed (${err.message ?? "unknown error"}), fell back to local host]`;
+      return {
+        ...fallback,
+        combined: `${notice}\n${fallback.combined}`,
+      };
     }
   }
 }
 
 let activeRunner: CommandRunner = new DevLocalCommandRunner();
 let currentSandboxMode: "local" | "docker" = "local";
+
+/**
+ * Per-session runner registry (Claude Code parity: concurrent runs never
+ * flip each other's mode mid-tool). Global activeRunner remains the
+ * fallback for legacy callers; per-agent context.runner wins when present.
+ */
+const sessionRunners = new Map<string, { runner: CommandRunner; mode: "local" | "docker" }>();
+
+export function setSessionRunner(sessionId: string, runner: CommandRunner, mode: "local" | "docker"): void {
+  sessionRunners.set(sessionId, { runner, mode });
+}
+
+export function getSessionRunner(sessionId: string): { runner: CommandRunner; mode: "local" | "docker" } | undefined {
+  return sessionRunners.get(sessionId);
+}
+
+export function clearSessionRunner(sessionId: string): void {
+  sessionRunners.delete(sessionId);
+  void removePersistentContainer(sessionId);
+}
 
 export interface SandboxConfig {
   mode?: "local" | "docker";
@@ -155,7 +191,16 @@ export async function ensurePersistentContainer(sessionId: string, config: Sandb
   try {
     const image = config.image ?? "node:20-slim";
     const name = `codeagent-${sessionId.replace(/[^a-z0-9_-]/gi, "").slice(0, 32)}`;
-    const args = ["create", "--name", name, "-i", "-w", "/workspace"];
+    const args = [
+      "create",
+      "--name", name,
+      "-i",
+      "-w", "/workspace",
+      "--memory=2g",
+      "--cpus=2",
+      "--pids-limit=256",
+      "--cap-drop=ALL",
+    ];
     if (config.network === false) args.push("--network=none");
     args.push(image, "sleep", "infinity");
     await execFileAsync("docker", args, { timeout: 30_000 });

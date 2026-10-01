@@ -86,21 +86,34 @@ export async function listFiles(repoRoot: string, relative = "."): Promise<strin
   let stat;
   try {
     stat = await fs.stat(startDir);
-  } catch {
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code === "EACCES" || code === "EPERM") throw new Error(`Permission denied: ${relative}`);
     throw new Error(`Path does not exist: ${relative}`);
   }
   if (!stat.isDirectory()) {
     throw new Error(`Not a directory: ${relative}`);
   }
+  try {
+    await assertRealpathInsideRepo(root, startDir);
+  } catch {
+    throw new Error(`Path escapes repository: ${relative}`);
+  }
 
   const results: string[] = [];
+  const unreadable: string[] = [];
+  let truncated = false;
 
   async function walk(dir: string): Promise<void> {
-    if (results.length >= MAX_LIST_FILES) return;
+    if (results.length >= MAX_LIST_FILES) {
+      truncated = true;
+      return;
+    }
     let entries;
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch {
+    } catch (e) {
+      unreadable.push(`${path.relative(root, dir).split(path.sep).join("/")}: ${(e as Error).message}`);
       return;
     }
     for (const entry of entries) {
@@ -111,14 +124,19 @@ export async function listFiles(repoRoot: string, relative = "."): Promise<strin
       } else {
         results.push(path.relative(root, full).split(path.sep).join("/"));
       }
-      if (results.length >= MAX_LIST_FILES) return;
+      if (results.length >= MAX_LIST_FILES) {
+        truncated = true;
+        return;
+      }
     }
   }
 
   await walk(startDir);
 
-  const out = results.join("\n");
-  return truncate(out, TRUNCATION_BUDGETS.listFiles);
+  const parts = [results.join("\n")];
+  if (unreadable.length > 0) parts.push(`[unreadable: ${unreadable.slice(0, 5).join("; ")}]`);
+  if (truncated) parts.push(`[...truncated at ${MAX_LIST_FILES} files]`);
+  return truncate(parts.join("\n"), TRUNCATION_BUDGETS.listFiles);
 }
 
 export async function readFile(repoRoot: string, filePath: string): Promise<string> {
@@ -174,6 +192,7 @@ export async function viewFile(
     );
   }
 
+  await assertRealpathInsideRepo(repoRoot, absolute);
   await assertNotBinary(absolute, filePath);
   const raw = await fs.readFile(absolute, "utf8");
   const lines = raw.split(/\r?\n/);
@@ -264,6 +283,11 @@ export async function editFile(
   if (!stat.isFile()) {
     throw new Error(`${filePath} is not a file`);
   }
+  if (stat.size > 2_000_000) {
+    throw new Error(
+      `${filePath} is too large (${stat.size} bytes). Refine your approach instead of editing it whole.`,
+    );
+  }
   await assertNotBinary(absolute, filePath);
   const content = await fs.readFile(absolute, "utf8");
 
@@ -299,6 +323,11 @@ export async function multiEdit(repoRoot: string, filePath: string, edits: Multi
     throw new Error(`File not found: ${filePath}`);
   }
   if (!stat.isFile()) throw new Error(`${filePath} is not a file`);
+  if (stat.size > 2_000_000) {
+    throw new Error(
+      `${filePath} is too large (${stat.size} bytes). Refine your approach instead of editing it whole.`,
+    );
+  }
   await assertNotBinary(absolute, filePath);
   let content = await fs.readFile(absolute, "utf8");
   const strategies: string[] = [];

@@ -1,0 +1,56 @@
+{
+  "total": 3,
+  "passed": 1,
+  "passRate": 0.3333333333333333,
+  "medianTurns": 9,
+  "totalCostUsd": 0,
+  "meanSeconds": 145.351,
+  "medianTtftMs": 2120,
+  "promptVersion": "codeagent-prompt/2.1",
+  "counts": {
+    "pass": 1,
+    "fail": 2,
+    "modelTimeout": 0,
+    "modelRateLimit": 0,
+    "providerError": 0
+  },
+  "effectivePassRate": 0.3333333333333333,
+  "results": [
+    {
+      "taskId": "adv-py-shadow",
+      "ok": false,
+      "outcome": "TASK_FAIL",
+      "failureReason": "Expected \"jsonutil\" not found in output or worktree",
+      "turns": 13,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "seconds": 75.664,
+      "ttftMs": 1286
+    },
+    {
+      "taskId": "adv-py-config",
+      "ok": false,
+      "outcome": "TASK_FAIL",
+      "failureReason": "verify \"python __evalcheck.py\" exited 1: l\\Temp\\codeagent-eval-adv-py-config-RBUpke\\__evalcheck.py\", line 17, in <module>\r\n    make()\r\n    ~~~~^^\r\n  File \"C:\\Users\\RIPONM~1\\AppData\\Local\\Temp\\codeagent-eval-adv-py-config-RBUpke\\__evalcheck.py\", line 11, in <lambda>\r\n    lambda: config.AppConfig(debug=\"yes\", workers=4),\r\n            ^^^^^^^^^^^^^^^^\r\nAttributeError: module 'config' has no attribute 'AppConfig'. Did you mean: 'DBConfig'?\r\n",
+      "turns": 9,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "seconds": 180.235,
+      "ttftMs": 2850
+    },
+    {
+      "taskId": "adv-py-plugins",
+      "ok": true,
+      "outcome": "TASK_PASS",
+      "turns": 9,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "seconds": 180.154,
+      "ttftMs": 2120
+    }
+  ],
+  "at": "2026-10-01T08:27:34.006Z"
+}

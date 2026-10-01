@@ -91,7 +91,8 @@ describe("agent loop", () => {
     const responder: Responder = async (input) => {
       inputLengths.push(input.length);
       n++;
-      if (n <= 2) throw new Error("413 Request too large (ITPM): Limit 7000, Requested 10760");
+      // 429 = true rate limit → backoff. (413 compacts instead — see below.)
+      if (n <= 2) throw new Error("429 rate limit exceeded: tokens per minute");
       return { output: [], output_text: "recovered" };
     };
     const agent = new Agent({

@@ -51,6 +51,7 @@ export interface ResponsesCreateResult {
 
 export interface ResponderOptions {
   tools?: boolean;
+  signal?: AbortSignal;
 }
 
 export type Responder = (input: unknown[], options?: ResponderOptions) => Promise<ResponsesCreateResult>;
@@ -62,15 +63,17 @@ export function createResponder(
   return async (input: unknown[], options?: ResponderOptions) => {
     const { tools } = await import("./tools.js");
     const useTools = options?.tools ?? true;
-    const response = await withProviderRetry(() =>
-      client.responses.create({
-        model: args.model,
-        instructions: args.instructions,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        tools: useTools ? (tools as any) : undefined,
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        input: input as any,
-      }),
+    const response = await withProviderRetry(
+      () =>
+        client.responses.create({
+          model: args.model,
+          instructions: args.instructions,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          tools: useTools ? (tools as any) : undefined,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          input: input as any,
+        }),
+      { signal: options?.signal, maxAttempts: 3 },
     );
     return mapResponsesApiResult({
       output: response.output as unknown as Array<Record<string, unknown>>,

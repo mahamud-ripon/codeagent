@@ -21,6 +21,21 @@ export async function getQuickDiagnostics(
   repoRoot: string,
   filePath: string,
 ): Promise<string | null> {
+  // Overall 6s ceiling: Python path runs ruff+py_compile sequentially (9s
+  // worst), tsc whole-project can stall — never block the agent loop.
+  const inner = getQuickDiagnosticsInner(repoRoot, filePath);
+  const timeout = new Promise<null>((resolve) => setTimeout(() => resolve(null), 6000));
+  try {
+    return await Promise.race([inner, timeout]);
+  } catch {
+    return null;
+  }
+}
+
+async function getQuickDiagnosticsInner(
+  repoRoot: string,
+  filePath: string,
+): Promise<string | null> {
   const ext = path.extname(filePath).toLowerCase();
   // Python: ruff / pyright when available (best-effort, 3s each).
   if (ext === ".py") {
@@ -106,7 +121,7 @@ export async function getQuickDiagnostics(
     const basename = path.basename(filePath).toLowerCase();
 
     try {
-      await execAsync("npx tsc --noEmit --pretty false", {
+      await execAsync("npx --no-install tsc --noEmit --pretty false", {
         cwd: repoRoot,
         signal: controller.signal,
         timeout: 3000,
@@ -204,14 +219,15 @@ async function getPythonDiagnostics(repoRoot: string, filePath: string): Promise
   } catch {
     return null;
   }
-  // 1. Try ruff check (fastest linter/syntax checker)
-  const ruff = await runBestEffort(`ruff check ${JSON.stringify(filePath)}`, repoRoot);
+  // 1. Try ruff check (fastest linter/syntax checker) + py_compile in
+  // parallel — sequential was 9s worst-case and blocked the loop.
+  const [ruff, pyCompile] = await Promise.all([
+    runBestEffort(`ruff check ${JSON.stringify(filePath)}`, repoRoot),
+    (async (): Promise<string | null> =>
+      (await runBestEffort(`python -m py_compile ${JSON.stringify(filePath)}`, repoRoot)) ??
+      (await runBestEffort(`python3 -m py_compile ${JSON.stringify(filePath)}`, repoRoot)))(),
+  ]);
   if (ruff) return `⚠️ Ruff:\n${ruff}`;
-
-  // 2. Built-in Python syntax compilation check (trying python, then python3)
-  const pyCompile =
-    (await runBestEffort(`python -m py_compile ${JSON.stringify(filePath)}`, repoRoot)) ??
-    (await runBestEffort(`python3 -m py_compile ${JSON.stringify(filePath)}`, repoRoot));
   if (pyCompile) return `⚠️ Python Syntax Error:\n${pyCompile}`;
 
   return null;

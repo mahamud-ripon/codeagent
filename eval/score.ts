@@ -45,8 +45,20 @@ export interface LiveSummary {
   results: LiveTaskResult[];
 }
 
-export function summarizeLive(results: LiveTaskResult[]): LiveSummary {
-  const total = results.length;
+/**
+ * Task `expect` strings may list alternatives separated by `|` (see
+ * eval/tasks.json, e.g. "i <= n|i < n"). Any alternative matching the
+ * final message or worktree counts as a pass. Pure, unit-tested.
+ */
+export function checkExpectMatch(haystack: string, expectPattern: string): boolean {
+  if (expectPattern.includes("|")) {
+    const parts = expectPattern.split("|").map((p) => p.trim()).filter(Boolean);
+    return parts.some((p) => haystack.includes(p));
+  }
+  return haystack.includes(expectPattern);
+}
+
+export function summarizeLive(results: LiveTaskResult[]): LiveSummary {  const total = results.length;
   const passed = results.filter((r) => r.ok).length;
   const turns = [...results.map((r) => r.turns)].sort((a, b) => a - b);
   const medianTurns = turns.length ? turns[Math.floor(turns.length / 2)]! : 0;
@@ -78,10 +90,10 @@ export function summarizeLive(results: LiveTaskResult[]): LiveSummary {
   };
 }
 
-export async function writeLiveResults(repoRoot: string, summary: LiveSummary): Promise<string> {
+export async function writeLiveResults(repoRoot: string, summary: LiveSummary, name = "live.json"): Promise<string> {
   const dir = path.join(repoRoot, "eval", "results");
   await fs.mkdir(dir, { recursive: true });
-  const file = path.join(dir, "live.json");
+  const file = path.join(dir, name);
   await fs.writeFile(file, JSON.stringify({ ...summary, at: new Date().toISOString() }, null, 2));
   return file;
 }

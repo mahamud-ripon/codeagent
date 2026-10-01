@@ -9,13 +9,17 @@
  * auto-approve on, so live runs never touch the real checkout. A task scores
  * `ok` when its `expect` substring appears in the final message or in any
  * file after the run. Selection: EVAL_TASKS=id1,id2 EVAL_LIMIT=n.
+ * Advanced suite: EVAL_TASKS_FILE=tasks-advanced.json runs the hard-task
+ * suite (optional per-task `verify` hidden checks, `timeoutSec`,
+ * `maxIterations`); results go to eval/results/live-advanced.json so the
+ * base baseline is never clobbered.
  */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { query } from "../src/sdk/query.js";
-import { renderLiveSummary, summarizeLive, writeLiveResults, type LiveTaskResult } from "./score.js";
+import { checkExpectMatch, renderLiveSummary, summarizeLive, writeLiveResults, type LiveTaskResult } from "./score.js";
 import { loadGlobalEnv } from "../src/cli/config.js";
 
 loadGlobalEnv();
@@ -41,9 +45,21 @@ interface Task {
   prompt: string;
   files: Record<string, string>;
   expect: string;
+  /** Hidden post-run check (written to the tmp repo only after the agent
+   * finishes, so the agent can never see or game it). */
+  verify?: { file: string; content: string; run: string; expectOut?: string };
+  /** Per-task budget overrides (defaults: 180 s, 15 iterations). */
+  timeoutSec?: number;
+  maxIterations?: number;
 }
 
-const tasks = JSON.parse(fs.readFileSync(path.join(root, "tasks.json"), "utf8")) as Task[];
+const tasksFile = (process.env.EVAL_TASKS_FILE ?? "tasks.json").replace(/[^a-z0-9_.-]+/gi, "-");
+const tasks = JSON.parse(fs.readFileSync(path.join(root, tasksFile), "utf8")) as Task[];
+// Advanced suites write beside the base baseline instead of clobbering it:
+// tasks.json -> live.json, tasks-advanced.json -> live-advanced.json.
+const stem = tasksFile.replace(/\.json$/i, "");
+const outBase = stem === "tasks" ? "live" : `live-${stem.replace(/^tasks-?/, "") || "custom"}`;
+const outFile = `${outBase}.json`;
 const only = (process.env.EVAL_TASKS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 const limit = Number(process.env.EVAL_LIMIT ?? "0") || tasks.length;
 const chunk = Number(process.env.EVAL_CHUNK ?? "0");
@@ -59,6 +75,25 @@ if (chunk > 0) {
 if (selected.length === 0) {
   console.error("eval:live: selection matched no tasks (check EVAL_TASKS or EVAL_CHUNK).");
   process.exit(2);
+}
+
+/** Run a hidden verify command inside the task repo (shell of the host OS). */
+import { exec } from "node:child_process";
+function runVerify(
+  cmd: string,
+  cwd: string,
+  timeoutMs = 90_000,
+): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  return new Promise((resolve) => {
+    exec(cmd, { cwd, timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+      const code = (err as { code?: unknown } | null)?.code;
+      resolve({
+        exitCode: typeof code === "number" ? code : err ? 1 : 0,
+        stdout: String(stdout ?? ""),
+        stderr: String(stderr ?? ""),
+      });
+    });
+  });
 }
 
 /** Read back all task files (bounded) so `expect` can match edited content. */
@@ -96,14 +131,6 @@ function collectWorktreeText(dir: string): string {
   return parts.join("\n");
 }
 
-function checkExpectMatch(haystack: string, expectPattern: string): boolean {
-  if (expectPattern.includes("|")) {
-    const parts = expectPattern.split("|").map((p) => p.trim()).filter(Boolean);
-    return parts.some((p) => haystack.includes(p));
-  }
-  return haystack.includes(expectPattern);
-}
-
 const results: LiveTaskResult[] = [];
 for (const task of selected) {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `codeagent-eval-${task.id}-`));
@@ -134,12 +161,13 @@ for (const task of selected) {
   };
   let finalMessage = "";
   let ok = false;
+  let verifyDetail = "";
   try {
-    const signal = AbortSignal.timeout(180_000);
+    const signal = AbortSignal.timeout(Math.max(30, task.timeoutSec ?? 180) * 1000);
     for await (const event of query(task.prompt, {
       repoRoot: tmp,
       autoApprove: true,
-      maxIterations: 15,
+      maxIterations: task.maxIterations ?? 15,
       signal,
     })) {
       if (event.type === "turn_start") {
@@ -157,8 +185,35 @@ for (const task of selected) {
         ttftMs = Date.now() - started;
       }
     }
+    // Hidden behavioral check: written into the tmp repo only after the
+    // agent finishes (the agent can never see or game it), executed, then
+    // deleted before scoring so it never leaks into expect matching.
+    let verifyOk = true;
+    if (task.verify) {
+      const vfile = path.join(tmp, task.verify.file);
+      try {
+        fs.writeFileSync(vfile, task.verify.content);
+        const out = await runVerify(task.verify.run, tmp);
+        if (out.exitCode !== 0) {
+          verifyOk = false;
+          verifyDetail = `verify "${task.verify.run}" exited ${out.exitCode}: ${(out.stdout + out.stderr).slice(-400)}`;
+        } else if (task.verify.expectOut && !out.stdout.includes(task.verify.expectOut)) {
+          verifyOk = false;
+          verifyDetail = `verify output missing ${JSON.stringify(task.verify.expectOut)}`;
+        }
+      } catch (e) {
+        verifyOk = false;
+        verifyDetail = `verify error: ${e instanceof Error ? e.message : String(e)}`;
+      } finally {
+        try {
+          fs.rmSync(vfile, { force: true });
+        } catch {
+          // ignore cleanup failures
+        }
+      }
+    }
     const haystack = `${finalMessage}\n${collectWorktreeText(tmp)}`;
-    ok = checkExpectMatch(haystack, task.expect);
+    ok = checkExpectMatch(haystack, task.expect) && verifyOk;
     flushTurn();
   } catch (e) {
     finalMessage = e instanceof Error ? e.message : String(e);
@@ -182,6 +237,9 @@ for (const task of selected) {
     } else if (/503|service unavailable|no available workers|circuits open|upstream error/i.test(finalMessage)) {
       outcome = "PROVIDER_ERROR";
       failureReason = "Upstream provider service unavailable";
+    } else if (verifyDetail) {
+      outcome = "TASK_FAIL";
+      failureReason = verifyDetail;
     } else {
       outcome = "TASK_FAIL";
       failureReason = `Expected "${task.expect}" not found in output or worktree`;
@@ -193,27 +251,27 @@ for (const task of selected) {
 
   if (chunk > 0) {
     const chunkSummary = summarizeLive(results);
-    const chunkFile = path.join(root, "results", `live-fast${chunk}.json`);
+    const chunkFile = path.join(root, "results", `${outBase}-fast${chunk}.json`);
     fs.writeFileSync(chunkFile, JSON.stringify({ ...chunkSummary, at: new Date().toISOString() }, null, 2));
   } else {
     if (results.length % chunkSize === 0) {
       const chunkIdx = Math.floor(results.length / chunkSize);
       const chunkSummary = summarizeLive(results.slice(results.length - chunkSize));
-      const chunkFile = path.join(root, "results", `live-fast${chunkIdx}.json`);
+      const chunkFile = path.join(root, "results", `${outBase}-fast${chunkIdx}.json`);
       fs.writeFileSync(chunkFile, JSON.stringify({ ...chunkSummary, at: new Date().toISOString() }, null, 2));
     }
     const runningSummary = summarizeLive(results);
-    await writeLiveResults(path.join(root, ".."), runningSummary);
+    await writeLiveResults(path.join(root, ".."), runningSummary, outFile);
   }
 }
 
 const summary = summarizeLive(results);
 if (chunk > 0) {
-  const chunkFile = path.join(root, "results", `live-fast${chunk}.json`);
+  const chunkFile = path.join(root, "results", `${outBase}-fast${chunk}.json`);
   console.log(renderLiveSummary(summary));
   console.log(`Wrote chunk ${chunk} to ${chunkFile}`);
 } else {
-  const file = await writeLiveResults(path.join(root, ".."), summary);
+  const file = await writeLiveResults(path.join(root, ".."), summary, outFile);
   console.log(renderLiveSummary(summary));
   console.log(`Wrote ${file}`);
 }

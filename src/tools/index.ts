@@ -58,19 +58,19 @@ const grepSchema = z.object({
   output_mode: z.enum(["content", "files", "count"]).optional(),
 });
 const globSchema = z.object({ pattern: z.string().min(1) });
-const webFetchSchema = z.object({ url: z.string().min(1) });
-const webSearchSchema = z.object({ query: z.string().min(1) });
-const askSchema = z.object({ question: z.string().min(1) });
-const gitLogSchema = z.object({ limit: z.number().int().positive().optional() });
+const webFetchSchema = z.object({ url: z.string().min(1).max(2000).refine((u) => /^https?:\/\//i.test(u), "web_fetch allows http(s) URLs only") });
+const webSearchSchema = z.object({ query: z.string().min(1).max(500) });
+const askSchema = z.object({ question: z.string().min(1).max(2000) });
+const gitLogSchema = z.object({ limit: z.number().int().positive().max(100).optional() });
 const runCommandSchema = z.object({
-  command: z.string().min(1),
+  command: z.string().min(1).max(4000),
   background: z.boolean().optional(),
-  timeout_ms: z.number().int().positive().optional(),
+  timeout_ms: z.number().int().positive().max(120_000).optional(),
 });
-const jobIdSchema = z.object({ job_id: z.string().min(1) });
+const jobIdSchema = z.object({ job_id: z.string().min(1).max(128) });
 const runSubagentsSchema = z.object({
-  tasks: z.array(z.object({ task: z.string().min(1), subagent_type: z.string().optional() })).min(1).max(5),
-  concurrency: z.number().int().positive().optional(),
+  tasks: z.array(z.object({ task: z.string().min(1).max(4000), subagent_type: z.string().optional() })).min(1).max(5),
+  concurrency: z.number().int().positive().max(5).optional(),
 });
 const todoWriteSchema = z.object({
   todos: z.array(
@@ -122,6 +122,13 @@ export interface ToolExecutionContext {
   providerOverrides?: ProviderOverrides;
   askUser?: (question: string) => Promise<string>;
   planApprover?: (plan: string) => Promise<boolean | string>;
+  /**
+   * Per-agent command runner (Claude Code parity: no global race when two
+   * concurrent runs flip sandbox mode mid-tool). Falls back to the global
+   * active runner for legacy callers/tests.
+   */
+  commandRunner?: import("./runner.js").CommandRunner;
+  sandboxMode?: "local" | "docker";
   /** User hooks (EX-3): PreToolUse/PostToolUse shell commands. Best effort. */
   hooks?: import("../agent/hooks.js").HookConfig;
   /** AG-14: stream spawn chunks as AgentEvent tool_output_delta. */
@@ -217,45 +224,38 @@ export async function executeTool(
     }
     case "read": {
       const a = parseArgs(readSchema, args, name);
-      if (context?.fileStateCache) {
-        try {
-          const abs = resolveInsideRepo(repoRoot, a.path);
-          const fullContent = await fs.readFile(abs, "utf8");
-          context.fileStateCache.recordRead(a.path, fullContent);
-        } catch {
-          // ignore — readPath below surfaces the real error
-        }
+      // Record what the tool actually returned (single read, capped) —
+      // no unbounded pre-read, no TOCTOU between cache and real read.
+      const out = await readPath(repoRoot, a.path, { offset: a.offset, limit: a.limit });
+      try {
+        context?.fileStateCache?.recordRead(a.path, out.slice(0, 2_000_000));
+      } catch {
+        // cache best-effort
       }
-      return readPath(repoRoot, a.path, { offset: a.offset, limit: a.limit });
+      return out;
     }
     case "read_file": {
       const a = parseArgs(readFileSchema, args, name);
       const content = await readFile(repoRoot, a.path);
-      if (context?.fileStateCache) {
-        try {
-          const full = await fs.readFile(resolveInsideRepo(repoRoot, a.path), "utf8");
-          context.fileStateCache.recordRead(a.path, full);
-        } catch {
-          context.fileStateCache.recordRead(a.path, content);
-        }
+      try {
+        context?.fileStateCache?.recordRead(a.path, content.slice(0, 2_000_000));
+      } catch {
+        // cache best-effort
       }
       return content;
     }
     case "view_file": {
       const a = parseArgs(viewFileSchema, args, name);
-      if (context?.fileStateCache) {
-        try {
-          const abs = resolveInsideRepo(repoRoot, a.path);
-          const fullContent = await fs.readFile(abs, "utf8");
-          context.fileStateCache.recordRead(a.path, fullContent);
-        } catch {
-          // ignore
-        }
-      }
-      return viewFile(repoRoot, a.path, {
+      const out = await viewFile(repoRoot, a.path, {
         startLine: a.start_line,
         endLine: a.end_line,
       });
+      try {
+        context?.fileStateCache?.recordRead(a.path, out.slice(0, 2_000_000));
+      } catch {
+        // cache best-effort
+      }
+      return out;
     }
     case "view_symbol_outline": {
       const a = parseArgs(viewSymbolOutlineSchema, args, name);
@@ -376,6 +376,20 @@ export async function executeTool(
     }
     case "run_command": {
       const a = parseArgs(runCommandSchema, args, name);
+      // Docker mode: foreground commands go through the per-agent runner so
+      // --sandbox docker is actually honored (Claude Code parity). Per-agent
+      // context.runner wins over the global (no cross-run race); background
+      // and streaming (onChunk) still need spawn for job control / deltas.
+      const { getActiveCommandRunner, getSandboxMode } = await import("./sandbox.js");
+      const mode = context?.sandboxMode ?? getSandboxMode();
+      const runner = context?.commandRunner ?? getActiveCommandRunner();
+      const useSandbox = mode === "docker" && !a.background && !context?.onToolOutputDelta;
+      if (useSandbox) {
+        const result = await runner.run(repoRoot, a.command, signal);
+        return result.combined
+          ? `exit code: ${result.exitCode}\n${result.combined}`
+          : `exit code: ${result.exitCode}`;
+      }
       // AG-14: foreground goes through spawn (tree kill, timeout, deltas);
       // background returns a job id for bash_output/kill_shell.
       const { runSpawn } = await import("./process.js");

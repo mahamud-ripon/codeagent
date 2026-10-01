@@ -10,3 +10,12 @@
 {"ts":"2026-09-30T21:27:38.420Z","repo":"D:\\Codeagent","kind":"permission","tool":"run_command","args":{"command":"drop database"},"decision":"deny","detail":"command denied"}
 {"ts":"2026-09-30T21:38:36.228Z","repo":"D:\\Codeagent","kind":"permission","tool":"run_command","args":{"command":"drop database"},"decision":"deny","detail":"command denied"}
 {"ts":"2026-09-30T21:39:19.428Z","repo":"D:\\Codeagent","kind":"permission","tool":"run_command","args":{"command":"drop database"},"decision":"deny","detail":"command denied"}
+{"ts":"2026-10-01T04:40:34.674Z","repo":"D:\\Codeagent","kind":"permission","tool":"run_command","args":{"command":"drop database"},"decision":"deny","detail":"command denied"}
+{"ts":"2026-10-01T04:41:13.196Z","repo":"D:\\Codeagent","kind":"permission","tool":"run_command","args":{"command":"drop database"},"decision":"deny","detail":"command denied"}
+{"ts":"2026-10-01T05:17:28.340Z","repo":"D:\\Codeagent","kind":"permission","tool":"run_command","args":{"command":"drop database"},"decision":"deny","detail":"command denied"}
+{"ts":"2026-10-01T06:36:43.654Z","repo":"D:\\Codeagent","kind":"permission","tool":"run_command","args":{"command":"drop database"},"decision":"deny","detail":"command denied"}
+{"ts":"2026-10-01T06:46:53.083Z","repo":"D:\\Codeagent","kind":"permission","tool":"run_command","args":{"command":"drop database"},"decision":"deny","detail":"command denied"}
+{"ts":"2026-10-01T06:59:59.014Z","repo":"D:\\Codeagent","kind":"permission","tool":"run_command","args":{"command":"drop database"},"decision":"deny","detail":"command denied"}
+{"ts":"2026-10-01T07:46:37.112Z","repo":"D:\\Codeagent","kind":"permission","tool":"run_command","args":{"command":"drop database"},"decision":"deny","detail":"command denied"}
+{"ts":"2026-10-01T07:46:56.476Z","repo":"D:\\Codeagent","kind":"permission","tool":"run_command","args":{"command":"drop database"},"decision":"deny","detail":"command denied"}
+{"ts":"2026-10-01T07:47:54.711Z","repo":"D:\\Codeagent","kind":"permission","tool":"run_command","args":{"command":"drop database"},"decision":"deny","detail":"command denied"}

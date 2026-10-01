@@ -42,6 +42,7 @@ export class McpClient {
     c.proc = proc;
     proc.stdout?.on("data", (d: Buffer) => c.onData(d.toString()));
     proc.on("error", (e) => c.failAll(e as Error));
+    proc.on("exit", (code) => c.failAll(new Error(`MCP server "${server}" exited (${code ?? "?"})`)));
     await c.initialize();
     return c;
   }
@@ -83,24 +84,50 @@ export class McpClient {
     this.pending.clear();
   }
 
-  private async send(method: string, params?: unknown): Promise<unknown> {
+  private async send(method: string, params?: unknown, timeoutMs = 30_000): Promise<unknown> {
     const id = this.nextId++;
     const body = JSON.stringify({ jsonrpc: "2.0", id, method, params });
     if (this.url) {
-      const res = await fetch(this.url, {
-        method: "POST",
-        headers: { "content-type": "application/json", ...this.headers },
-        body,
-      });
-      if (!res.ok) throw new Error(`MCP HTTP ${res.status}`);
-      const msg = (await res.json()) as { result?: unknown; error?: { message?: string } };
-      if (msg.error) throw new Error(`MCP: ${msg.error.message ?? "error"}`);
-      return msg.result;
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+      try {
+        const res = await fetch(this.url, {
+          method: "POST",
+          headers: { "content-type": "application/json", ...this.headers },
+          body,
+          signal: ctrl.signal,
+        });
+        if (!res.ok) throw new Error(`MCP HTTP ${res.status}`);
+        const msg = (await res.json()) as { result?: unknown; error?: { message?: string } };
+        if (msg.error) throw new Error(`MCP: ${msg.error.message ?? "error"}`);
+        return msg.result;
+      } catch (e) {
+        if ((e as Error).name === "AbortError") throw new Error(`MCP "${method}" timed out after ${timeoutMs / 1000}s`);
+        throw e;
+      } finally {
+        clearTimeout(timer);
+      }
     }
     if (!this.proc?.stdin?.writable) throw new Error("MCP stdio server not connected.");
-    const done = new Promise<unknown>((resolve, reject) => this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject }));
-    this.proc.stdin.write(body + "\n");
-    return done;
+    let timer: NodeJS.Timeout | undefined;
+    const done = new Promise<unknown>((resolve, reject) => {
+      this.pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+      timer = setTimeout(() => {
+        if (this.pending.delete(id)) reject(new Error(`MCP "${method}" timed out after ${timeoutMs / 1000}s`));
+      }, timeoutMs);
+    });
+    try {
+      this.proc.stdin.write(body + "\n");
+    } catch (e) {
+      if (timer) clearTimeout(timer);
+      this.pending.delete(id);
+      throw e;
+    }
+    try {
+      return await done;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
   }
 
   private async initialize(): Promise<void> {
@@ -130,7 +157,7 @@ export class McpClient {
 
   async close(): Promise<void> {
     try { this.proc?.kill(); } catch { /* noop */ }
-    this.pending.clear();
+    this.failAll(new Error("MCP client closed"));
   }
 }
 
@@ -139,7 +166,14 @@ export function namespacedToolId(server: string, tool: string): string {
 }
 
 export function parseNamespacedTool(id: string): { server: string; tool: string } | null {
-  const m = id.match(/^mcp__([^_][^_]*)__(.+)$/);
+  // Servers may contain underscores (my_server) — split on the LAST __.
+  const m = id.match(/^mcp__(.*)__(.+)$/);
   if (!m) return null;
-  return { server: m[1]!, tool: m[2]! };
+  const server = m[1]!;
+  const tool = m[2]!;
+  if (!server || !tool || server.startsWith("_") || tool.includes("__")) {
+    // Keep strict: empty segments rejected; tool names with __ unsupported.
+    if (!server || !tool) return null;
+  }
+  return { server, tool };
 }

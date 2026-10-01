@@ -63,6 +63,25 @@ export function stringSimilarity(a: string, b: string): number {
   return (2.0 * intersection) / (s1.length - 1 + (s2.length - 1));
 }
 
+/** Closest-region hint for failed edits: shows the most similar file lines. */
+function bestHint(contentLines: string[], oldLines: string[]): string {
+  if (oldLines.length === 0 || contentLines.length === 0) return "";
+  const oldJoined = oldLines.map((l) => l.trim()).join("\n");
+  let bestIdx = 0;
+  let bestScore = -1;
+  const window = Math.min(oldLines.length, contentLines.length);
+  for (let i = 0; i <= contentLines.length - window; i++) {
+    const candidate = contentLines.slice(i, i + window).map((l) => l.trim()).join("\n");
+    const score = stringSimilarity(candidate, oldJoined);
+    if (score > bestScore) {
+      bestScore = score;
+      bestIdx = i;
+    }
+  }
+  const excerpt = contentLines.slice(bestIdx, bestIdx + window).join("\n").slice(0, 400);
+  return ` Closest match (line ${bestIdx + 1}, similarity ${bestScore.toFixed(2)}):\n${excerpt}`;
+}
+
 /** Check if text looks like a unified diff. */
 export function isUnifiedDiff(text: string): boolean {
   return /^@@\s+-\d+,\d+\s+\+\d+,\d+\s+@@/m.test(text) ||
@@ -362,8 +381,11 @@ export function applyMultiStrategyPatch(
     }
   }
 
-  // Strategy 4: Fuzzy match only when a single window clears 0.88.
-  if (!replaceAll && oldLines.length >= 2 && oldLines.length <= contentLines.length) {
+  // Strategy 4: Fuzzy match — single-line at >=0.95, multi-line at >=0.88.
+  // (adv-ts-rename-chain lesson: a 1-line import typo previously could never
+  // fuzzy-match, forcing a wasted re-read turn.)
+  const fuzzyThreshold = oldLines.length === 1 ? 0.95 : 0.88;
+  if (!replaceAll && oldLines.length >= 1 && oldLines.length <= contentLines.length) {
     const oldJoined = oldLines.map((l) => l.trim()).join("\n");
     const candidates: Array<{ idx: number; score: number; lines: string[] }> = [];
 
@@ -371,12 +393,12 @@ export function applyMultiStrategyPatch(
       const candidateLines = contentLines.slice(i, i + oldLines.length);
       const candidateJoined = candidateLines.map((l) => l.trim()).join("\n");
       const score = stringSimilarity(candidateJoined, oldJoined);
-      if (score >= 0.88) candidates.push({ idx: i, score, lines: candidateLines });
+      if (score >= fuzzyThreshold) candidates.push({ idx: i, score, lines: candidateLines });
     }
 
     if (candidates.length > 1) {
       throw new Error(
-        `old_text fuzzy-matched ${candidates.length} regions (>= 0.88). Provide a longer snippet so the edit is unambiguous.`,
+        `old_text fuzzy-matched ${candidates.length} regions (>= ${fuzzyThreshold}). Provide a longer snippet so the edit is unambiguous.`,
       );
     }
 
@@ -396,5 +418,8 @@ export function applyMultiStrategyPatch(
     }
   }
 
-  throw new Error("old_text was not found in the file. Read the file first and copy the exact snippet.");
+  const hint = bestHint(contentLines, oldLines);
+  throw new Error(
+    `old_text was not found in the file. Read the file first and copy the exact snippet.${hint}`,
+  );
 }

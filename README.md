@@ -1,6 +1,6 @@
 # codeagent
 
-CLI-first autonomous coding agent: natural-language task in, verified Git diff out. `v0.7.0` — live-verification slice: first measured baseline 29/36, SSE byte-decode + system-fold + no-action-nudge fixes (see `CHANGELOG.md`; clean re-run, CI run + publish remain).
+CLI-first autonomous coding agent: natural-language task in, verified Git diff out. `v0.8.0` — advanced benchmark suite: 20 hard tasks with hidden behavioral checks (see `CHANGELOG.md`).
 
 ```
 task -> shadow checkpoint -> intent check (regex + fast-model second opinion) -> explore / research (subagent, ranked map, symbols, ripgrep, read)
@@ -285,7 +285,7 @@ MODEL=qwen/qwen3-coder:free
 # Type-check TypeScript codebase
 npm run typecheck
 
-# Run the automated test suite (350 across 34 files)
+# Run the automated test suite (361 across 35 files)
 
 npm test
 
@@ -314,6 +314,18 @@ CI (`.github/workflows/ci.yml`): ubuntu + windows + macos, Node 22 — `npm ci`,
 | Prompt | `codeagent-prompt/2.0` | Pinned in smoke/live results + fixtures |
 
 Fails (3): `bug-ts-off-by-one`, `bug-ts-null`, `refactor-extract` (pure exact-string expect assertions). Timeouts: 0 · Rate limits: 0 · Provider errors: 0. Merged single-window baseline evidence in `eval/results/live.json`. Live fixtures: `eval/fixtures/live-probe.jsonl`, `fast-probe.jsonl`, `live-tools.jsonl`.
+
+## Advanced benchmarks (hard tasks, hidden checks)
+
+Beyond the 36 basic tasks, `eval/tasks-advanced.json` holds 20 hard tasks (9 TS, 7 Python, 4 Go): multi-file renames, import-cycle breaking, middleware/emitter/pagination features, validation extraction, retry/LRU/CSV/shadowing/dataclass/plugin/migration work, and Go worker-pool/error-wrap/limiter jobs. Every task carries a hidden `verify` check — written into the throwaway repo only after the agent finishes, executed, then deleted — so substring matching is never the only gate.
+
+```bash
+# Needs node + python + go toolchains (verify scripts run real code)
+EVAL_LIVE=1 EVAL_TASKS_FILE=tasks-advanced.json npm run eval:live
+EVAL_LIVE=1 EVAL_TASKS_FILE=tasks-advanced.json EVAL_TASKS=adv-py-lru npm run eval:live
+```
+
+Results land in `eval/results/live-advanced.json` (base `live.json` untouched). Schema and check-liveness are covered offline by `tests/advancedTasks.test.ts`. Pilot on `nvidia/nemotron-3-ultra-550b-a55b`: 2/2 (`adv-py-lru` 7 turns, `adv-ts-emitter` 15 turns after a check fix).
 
 ## Headless, SDK, integrations
 

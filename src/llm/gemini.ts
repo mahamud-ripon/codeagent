@@ -161,6 +161,8 @@ export function createGeminiProvider(opts: GeminiProviderOptions): Provider {
           }
           return r;
         }),
+        // Inner layer only (outer retries whole stream): bound total to 2×3.
+        { signal: req.signal, maxAttempts: 2 },
       );
       if (!res.body) throw new Error("Gemini stream had no body.");
       const acc = new Map<number, { id: string; name: string; arguments: string; started: boolean }>();

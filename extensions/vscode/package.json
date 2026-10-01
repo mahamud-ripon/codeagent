@@ -2,7 +2,7 @@
   "name": "codeagent-vscode",
   "displayName": "CodeAgent",
   "description": "Autonomous AI coding agent inside VS Code powered by CodeAgent ACP bridge.",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "publisher": "mahamud-ripon",
   "license": "MIT",
   "repository": {

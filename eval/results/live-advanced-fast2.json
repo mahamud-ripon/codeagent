@@ -1,0 +1,54 @@
+{
+  "total": 3,
+  "passed": 3,
+  "passRate": 1,
+  "medianTurns": 15,
+  "totalCostUsd": 0,
+  "meanSeconds": 133.18933333333334,
+  "medianTtftMs": 963,
+  "promptVersion": "codeagent-prompt/2.1",
+  "counts": {
+    "pass": 3,
+    "fail": 0,
+    "modelTimeout": 0,
+    "modelRateLimit": 0,
+    "providerError": 0
+  },
+  "effectivePassRate": 1,
+  "results": [
+    {
+      "taskId": "adv-ts-emitter",
+      "ok": true,
+      "outcome": "TASK_PASS",
+      "turns": 10,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "seconds": 104.616,
+      "ttftMs": 910
+    },
+    {
+      "taskId": "adv-ts-config-merge",
+      "ok": true,
+      "outcome": "TASK_PASS",
+      "turns": 15,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "seconds": 160.111,
+      "ttftMs": 1872
+    },
+    {
+      "taskId": "adv-ts-paginate",
+      "ok": true,
+      "outcome": "TASK_PASS",
+      "turns": 15,
+      "inputTokens": 0,
+      "outputTokens": 0,
+      "costUsd": 0,
+      "seconds": 134.841,
+      "ttftMs": 963
+    }
+  ],
+  "at": "2026-10-01T08:06:22.293Z"
+}

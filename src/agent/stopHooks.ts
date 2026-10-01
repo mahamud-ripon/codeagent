@@ -40,9 +40,13 @@ export async function evaluateStopHooks(context: StopHookContext): Promise<StopH
   }
 
   // 2. Incomplete Tasks check: Agent cannot leave in-progress tasks dangling
+  // Production tweak (adv-ts-emitter lesson): when files were already
+  // modified and diagnostics are clean, a stale in_progress todo is advisory,
+  // not blocking — otherwise the loop burns turns re-reading instead of
+  // closing the todo. Still blocks when no work has started.
   if (context.todoManager) {
     const active = context.todoManager.getActiveTask();
-    if (active) {
+    if (active && context.modifiedFiles.size === 0) {
       blockingErrors.push(
         `[STOP HOOK BLOCKED]: Task '${active.content}' is still marked as in_progress. Complete the task or update todo_write before concluding.`,
       );

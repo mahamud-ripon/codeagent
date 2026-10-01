@@ -532,6 +532,7 @@ async function runTask(
         session.activeSession.model = info.model;
         session.activeSession.provider = session.provider;
         session.activeSession.baseURL = session.baseURL;
+        session.activeSession.usage = session.usage;
         rewriteSessionHistory(session.activeSession, afterHistory, session.sessionHome);
         const snap = {
           index: (session.activeSession.turns?.length ?? 0) + 1,
@@ -556,10 +557,22 @@ async function runTask(
             model: info.model,
             provider: session.provider,
             baseURL: session.baseURL,
+            usageAppend: result.usage
+              ? {
+                  input: result.usage.input ?? 0,
+                  output: result.usage.output ?? 0,
+                  costUsd:
+                    result.usage.costUsd ??
+                    estimateCostUsd(info.model, result.usage.input ?? 0, result.usage.output ?? 0) ??
+                    0,
+                  cachedInput: result.usage.cachedInput ?? 0,
+                }
+              : undefined,
           },
           session.sessionHome,
         );
         session.history = session.activeSession.history;
+        session.usage = session.activeSession.usage ?? session.usage;
       }
     }
 
@@ -1220,6 +1233,16 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
             console.log(c.dim("Usage: /repo <path>"));
           } else {
             const newRoot = path.resolve(args);
+            try {
+              const st = fs.statSync(newRoot);
+              if (!st.isDirectory()) {
+                console.log(c.red(`  Not a directory: ${args}`));
+                break;
+              }
+            } catch {
+              console.log(c.red(`  Path does not exist: ${args}`));
+              break;
+            }
             if (newRoot === session.repoRoot) {
               console.log(c.dim(`  Already on repository: ${session.repoRoot}`));
               break;
