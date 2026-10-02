@@ -20,6 +20,24 @@ export const BLOCKED_PATTERNS = [
   /format\s+[a-z]:/i,
 ];
 
+/**
+ * Phase 2 hygiene (shellHint): multi-line `node -e` / `python -c` is
+ * unreliable under cmd.exe via child_process.exec on Windows (not
+ * PowerShell). When hygiene is on, return an error that tells the model to
+ * write a temp script instead. Never silently rewrite bash.
+ */
+export function shellHintForCommand(command: string): string | null {
+  if (!/\n/.test(command)) return null;
+  if (!/\b(node(\.exe)?|python3?(\.exe)?)\s+.*-(e|c)\b/i.test(command)) return null;
+  const platform = process.platform;
+  const shell = platform === "win32" ? "cmd.exe via child_process.exec (not PowerShell)" : "/bin/sh";
+  return (
+    `Multi-line inline script detected (platform: ${platform}, shell: ${shell}). ` +
+    `Do not use multi-line \`node -e\` / \`python -c\`: quoting fails here. ` +
+    `Write a temp script file (e.g. write_file _eval_tmp.js) and run it with \`node\` / \`python\` instead.`
+  );
+}
+
 export interface CommandResult {
   exitCode: number;
   stdout: string;

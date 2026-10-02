@@ -42,20 +42,30 @@ const report = {
   note: "Live model scores need EVAL_LIVE=1 and an API key. This smoke run checks the task set only.",
 };
 fs.writeFileSync(path.join(outDir, "smoke.json"), JSON.stringify(report, null, 2));
-fs.writeFileSync(
-  path.join(root, "BASELINE.md"),
-  [
-    "# Eval baseline",
-    "",
-    "A live model baseline was not recorded in this environment because no model endpoint was configured.",
-    "The smoke runner validates the task set. Run `npm run eval` in CI.",
-    "Set `EVAL_LIVE=1` when a provider is available to score the same tasks against a model.",
-    "",
-    `Smoke: ${tasks.length} tasks, ok=${report.ok}.`,
-    `Prompt version: ${PROMPT_VERSION} (compare with eval/results/live.json after a live run; a mismatch means the baseline is stale).`,
-    "",
-  ].join("\n"),
-);
+// Phase 0: BASELINE.md is the phased record (v1 frozen hash + v2 sections).
+// The smoke runner must never clobber it. Only create a minimal file when
+// none exists; otherwise leave the phased baseline untouched.
+try {
+  const baselineFile = path.join(root, "BASELINE.md");
+  if (!fs.existsSync(baselineFile) || !fs.readFileSync(baselineFile, "utf8").includes("advanced-v1")) {
+    fs.writeFileSync(
+      baselineFile,
+      [
+        "# Eval baseline",
+        "",
+        "A live model baseline was not recorded in this environment because no model endpoint was configured.",
+        "The smoke runner validates the task set. Run `npm run eval` in CI.",
+        "Set `EVAL_LIVE=1` when a provider is available to score the same tasks against a model.",
+        "",
+        `Smoke: ${tasks.length} tasks, ok=${report.ok}.`,
+        `Prompt version: ${PROMPT_VERSION} (compare with eval/results/live.json after a live run; a mismatch means the baseline is stale).`,
+        "",
+      ].join("\n"),
+    );
+  }
+} catch {
+  // baseline is advisory; smoke result above is the gate
+}
 
 if (errors.length > 0) {
   console.error(errors.join("\n"));

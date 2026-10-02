@@ -133,6 +133,12 @@ export interface ToolExecutionContext {
   hooks?: import("../agent/hooks.js").HookConfig;
   /** AG-14: stream spawn chunks as AgentEvent tool_output_delta. */
   onToolOutputDelta?: (chunk: string) => void;
+  /** Phase 2/4 thin-runtime flags (default off = baseline behavior). */
+  flags?: import("../agent/runtimeFlags.js").RuntimeFlags;
+  /** Phase 2 hideGitOutsideRepo: false means git tools are not offered. */
+  isGitRepo?: boolean;
+  /** Phase 2 skipSmallTodos: repos with <= 8 source files omit todo_write. */
+  sourceFileCount?: number;
 }
 
 function editTexts(args: {
@@ -216,14 +222,59 @@ export async function executeTool(
       throw new Error(planCheck.reason);
     }
   }
+  // Phase 2 tool assembly (fail-closed when the tool list omits them).
+  const hygieneOn = context?.flags?.hygiene ?? false;
+  const economyOn = context?.flags?.economy ?? false;
+  // Capability guard (always on, not behind flags): never offer git tools
+  // outside a git repo, never offer web_search without an endpoint.
+  // Fixes tool hallucinations reported in manual tests.
+  if (context?.isGitRepo === false && (name === "git_status" || name === "git_diff" || name === "git_log")) {
+    throw new Error(`TOOL ERROR (${name}): not a git repo — git tools are not offered here. Review with read or list_files instead.`);
+  }
+  if (name === "web_search" && !process.env.TAVILY_API_KEY?.trim() && !process.env.WEB_SEARCH_ENDPOINT?.trim()) {
+    throw new Error(
+      `TOOL ERROR (web_search): web search is not configured (no TAVILY_API_KEY or WEB_SEARCH_ENDPOINT). ` +
+      `Tell the user web access is unavailable and do not answer current-fact questions from stale knowledge as if verified. ` +
+      `Label any background info as unverified.`,
+    );
+  }
+  if (economyOn && name === "todo_write" && typeof context?.sourceFileCount === "number" && context.sourceFileCount <= 8) {
+    throw new Error(`TOOL ERROR (todo_write): small repo (${context.sourceFileCount} files) — todos omitted. Implement directly.`);
+  }
+  // Phase 2 hygiene (shellHint): multi-line node -e / python -c is rejected
+  // with guidance, never silently rewritten.
+  if (hygieneOn && name === "run_command" && typeof (args as { command?: unknown }).command === "string") {
+    const { shellHintForCommand } = await import("./runner.js");
+    const hint = shellHintForCommand(String((args as { command?: string }).command));
+    if (hint) throw new Error(`TOOL ERROR (run_command): ${hint}`);
+  }
 
   switch (name as ToolName) {
     case "list_files": {
       const a = parseArgs(listFilesSchema, args, name);
-      return listFiles(repoRoot, a.path);
+      return listFiles(repoRoot, a.path, hygieneOn);
     }
     case "read": {
       const a = parseArgs(readSchema, args, name);
+      // Phase 2 economy (readCache): second read of an unchanged hash is a stub.
+      if (economyOn && (a.offset === undefined && a.limit === undefined) && context?.fileStateCache?.hasObserved(a.path)) {
+        try {
+          const drift = await context.fileStateCache.detectDrift(repoRoot, a.path);
+          if (!drift.hasDrifted && drift.currentHash) {
+            const { readFile: readRaw } = await import("./filesystem.js");
+            let lines = 0;
+            try {
+              const raw = await readRaw(repoRoot, a.path);
+              lines = raw.split("\n").length;
+            } catch {
+              lines = 0;
+            }
+            return `unchanged since last read (${a.path}, ${lines} lines, hash ${drift.currentHash.slice(0, 12)}). No body returned.`;
+          }
+        } catch {
+          // fall through to normal read
+        }
+      }
       // Record what the tool actually returned (single read, capped) —
       // no unbounded pre-read, no TOCTOU between cache and real read.
       const out = await readPath(repoRoot, a.path, { offset: a.offset, limit: a.limit });
@@ -236,6 +287,23 @@ export async function executeTool(
     }
     case "read_file": {
       const a = parseArgs(readFileSchema, args, name);
+      if (economyOn && context?.fileStateCache?.hasObserved(a.path)) {
+        try {
+          const drift = await context.fileStateCache.detectDrift(repoRoot, a.path);
+          if (!drift.hasDrifted && drift.currentHash) {
+            let lines = 0;
+            try {
+              const raw = await readFile(repoRoot, a.path);
+              lines = raw.split("\n").length;
+            } catch {
+              lines = 0;
+            }
+            return `unchanged since last read (${a.path}, ${lines} lines, hash ${drift.currentHash.slice(0, 12)}). No body returned.`;
+          }
+        } catch {
+          // fall through
+        }
+      }
       const content = await readFile(repoRoot, a.path);
       try {
         context?.fileStateCache?.recordRead(a.path, content.slice(0, 2_000_000));
@@ -303,7 +371,11 @@ export async function executeTool(
       const { oldText, newText } = editTexts(a);
       await enforceReadBeforeWrite(repoRoot, a.path, context?.fileStateCache, "edit");
       await context?.fileStateCache?.recordSnapshotBeforeEdit(repoRoot, a.path);
-      const res = await editFile(repoRoot, a.path, oldText, newText, { replaceAll: a.replace_all });
+      const res = await editFile(repoRoot, a.path, oldText, newText, {
+        replaceAll: a.replace_all,
+        snippet: economyOn,
+        rebase: hygieneOn,
+      });
       if (context?.fileStateCache) {
         try {
           const abs = resolveInsideRepo(repoRoot, a.path);
@@ -324,7 +396,7 @@ export async function executeTool(
         const texts = editTexts(edit);
         return { oldText: texts.oldText, newText: texts.newText, replaceAll: edit.replace_all };
       });
-      const res = await multiEdit(repoRoot, a.path, edits);
+      const res = await multiEdit(repoRoot, a.path, edits, { snippet: economyOn, rebase: hygieneOn });
       if (context?.fileStateCache) {
         try {
           const updated = await fs.readFile(resolveInsideRepo(repoRoot, a.path), "utf8");
@@ -337,7 +409,7 @@ export async function executeTool(
     }
     case "search": {
       const a = parseArgs(searchSchema, args, name);
-      return search(repoRoot, a.query);
+      return search(repoRoot, a.query, hygieneOn);
     }
     case "grep": {
       const a = parseArgs(grepSchema, args, name);
@@ -352,6 +424,7 @@ export async function executeTool(
         after: a.after,
         context: a.context,
         outputMode: a.output_mode,
+        hygieneOn,
       });
     }
     case "glob": {

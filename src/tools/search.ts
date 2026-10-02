@@ -32,7 +32,7 @@ export function resolveRgBinary(): string {
   return cachedRg;
 }
 
-export async function search(repoRoot: string, query: string): Promise<string> {
+export async function search(repoRoot: string, query: string, hygieneOn = false): Promise<string> {
   if (!query || !query.trim()) {
     throw new Error("Search query cannot be empty");
   }
@@ -42,7 +42,7 @@ export async function search(repoRoot: string, query: string): Promise<string> {
 
   const rg = resolveRgBinary();
   const args = ["--line-number", "--no-heading", "--hidden"];
-  for (const glob of ripgrepIgnoreGlobs()) {
+  for (const glob of ripgrepIgnoreGlobs(hygieneOn)) {
     args.push("--glob", glob);
   }
   args.push("--", query, ".");
@@ -85,7 +85,7 @@ export interface GrepOptions {
 }
 
 /** ripgrep with path, glob, case, context, and output mode. */
-export async function grep(repoRoot: string, options: GrepOptions): Promise<string> {
+export async function grep(repoRoot: string, options: GrepOptions & { hygieneOn?: boolean }): Promise<string> {
   const query = options.query?.trim() ?? "";
   if (!query) throw new Error("grep query cannot be empty");
   if (query.length > 500) throw new Error("grep query too long (500 char limit)");
@@ -103,7 +103,7 @@ export async function grep(repoRoot: string, options: GrepOptions): Promise<stri
     if (options.after && options.after > 0) args.push("-A", String(Math.min(options.after, 20)));
   }
   if (options.glob) args.push("--glob", options.glob);
-  for (const glob of ripgrepIgnoreGlobs()) args.push("--glob", glob);
+  for (const glob of ripgrepIgnoreGlobs(options.hygieneOn ?? false)) args.push("--glob", glob);
   args.push("--", query, options.path && options.path.trim() ? options.path : ".");
 
   try {

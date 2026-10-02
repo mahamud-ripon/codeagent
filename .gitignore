@@ -35,6 +35,7 @@ eval/results/*.log
 eval/results/fast*.log
 eval/results/live-fast*.json
 eval/results/live-degraded*.json
+eval/results/
 
 # Local agent runtime sessions
 .codeagent/sessions/

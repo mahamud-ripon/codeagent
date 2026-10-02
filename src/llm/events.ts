@@ -5,7 +5,16 @@ export type ProviderEvent =
   | { type: "tool_call_start"; id: string; name: string }
   | { type: "tool_call_delta"; id: string; argumentsDelta: string }
   | { type: "tool_call_end"; id: string; name: string; arguments: string }
-  | { type: "usage"; input: number; output: number; cachedInput?: number }
+  | {
+      type: "usage";
+      input: number;
+      output: number;
+      cachedInput?: number;
+      /** Null when the provider omits reasoning tokens (not zero). */
+      reasoningTokens?: number | null;
+      /** True when usage was estimated from text size (provider sent none). */
+      usageEstimated?: boolean;
+    }
   | { type: "stop"; finishReason: string };
 
 /**
@@ -27,7 +36,17 @@ export type AgentEvent =
     }
   | { type: "todo_update"; todos: unknown[] }
   | { type: "plan_proposed"; plan: string }
-  | { type: "usage"; input: number; output: number; cachedInput?: number; costUsd?: number }
+  | {
+      type: "usage";
+      input: number;
+      output: number;
+      cachedInput?: number;
+      costUsd?: number;
+      reasoningTokens?: number | null;
+      usageEstimated?: boolean;
+      /** Provider-layer retries backing this turn (inside withProviderRetry). */
+      providerRetries?: number;
+    }
   | { type: "compaction"; before: number; after: number }
   | { type: "error"; message: string; retryable: boolean }
   | { type: "done"; result: unknown };
@@ -37,4 +56,6 @@ export interface StreamRequest {
   messages: unknown[];
   tools: boolean;
   signal?: AbortSignal;
+  /** Tool names to hide (capability-aware exposure). */
+  exclude?: string[];
 }

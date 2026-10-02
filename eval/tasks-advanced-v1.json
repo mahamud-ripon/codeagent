@@ -1,0 +1,357 @@
+[
+  {
+    "id": "adv-ts-rename-chain",
+    "bucket": "rename",
+    "language": "ts",
+    "prompt": "Rename the date formatter to formatDateTime across the codebase. Do not touch vendored code.",
+    "files": {
+      "util/date.js": "function formatDate(d) {\n  return d.toISOString().slice(0, 10);\n}\n\nfunction formatMoney(cents) {\n  return \"$\" + (cents / 100).toFixed(2);\n}\n\nmodule.exports = { formatDate, formatMoney };\n",
+      "app.js": "const { formatDate } = require(\"./util/date\");\n\nconsole.log(formatDate(new Date()));\n",
+      "report.js": "const { formatDate, formatMoney } = require(\"./util/date\");\n\nfunction line(d, cents) {\n  return formatDate(d) + \" \" + formatMoney(cents);\n}\n\nmodule.exports = { line };\n",
+      "vendor/legacy.js": "// vendored, do not touch\nfunction formatDate(d) {\n  return d.toDateString();\n}\n\nmodule.exports = { formatDate };\n"
+    },
+    "expect": "formatDateTime",
+    "verify": {
+      "file": "__evalcheck.js",
+      "content": "const fs = require(\"fs\");\nconst fail = (m) => { console.error(\"FAIL: \" + m); process.exit(1); };\nconst date = fs.readFileSync(\"util/date.js\", \"utf8\");\nconst app = fs.readFileSync(\"app.js\", \"utf8\");\nconst report = fs.readFileSync(\"report.js\", \"utf8\");\nconst legacy = fs.readFileSync(\"vendor/legacy.js\", \"utf8\");\nif (!/function formatDateTime|formatDateTime\\s*=|exports\\.formatDateTime/.test(date)) fail(\"new export missing in util/date.js\");\nif (!app.includes(\"formatDateTime\")) fail(\"app.js not updated\");\nif (!report.includes(\"formatDateTime\")) fail(\"report.js not updated\");\nfor (const [n, src] of [[\"util/date.js\", date], [\"app.js\", app], [\"report.js\", report]]) {\n  if (/formatDate(?!Time)/.test(src.replace(/formatMoney/g, \"\"))) fail(\"old name remains in \" + n);\n}\nif (!legacy.includes(\"formatDate\") || !legacy.includes(\"vendored\")) fail(\"vendor/legacy.js was touched\");\nconst m = require(\"./util/date.js\");\nif (typeof m.formatDateTime !== \"function\" || typeof m.formatMoney !== \"function\") fail(\"exports broken\");\nconsole.log(\"RENAME-OK\");\n",
+      "run": "node __evalcheck.js",
+      "expectOut": "RENAME-OK"
+    }
+  },
+  {
+    "id": "adv-ts-import-cycle",
+    "bucket": "bugfix",
+    "language": "ts",
+    "prompt": "greet('Bob') should return 'Hi Bob!' but returns 'Hi Bob'. The modules depend on each other. Fix it without breaking the public API.",
+    "files": {
+      "a.js": "const b = require(\"./b\");\nconst PREFIX = \"Hi\";\n\nfunction greet(name) {\n  return PREFIX + \" \" + b.suffix(name);\n}\n\nmodule.exports = { greet, PREFIX };\n",
+      "b.js": "const a = require(\"./a\");\n\nfunction suffix(name) {\n  return a.PREFIX ? name + \"!\" : name;\n}\n\nmodule.exports = { suffix };\n",
+      "logger.js": "function log(msg) {\n  return \"[log] \" + msg;\n}\n\nmodule.exports = { log };\n"
+    },
+    "expect": "suffix",
+    "verify": {
+      "file": "__evalcheck.js",
+      "content": "const fail = (m) => { console.error(\"FAIL: \" + m); process.exit(1); };\ndelete require.cache[require.resolve(\"./a.js\")];\ntry { delete require.cache[require.resolve(\"./b.js\")]; } catch {}\ntry { delete require.cache[require.resolve(\"./constants.js\")]; } catch {}\nconst a = require(\"./a.js\");\nif (a.greet(\"Bob\") !== \"Hi Bob!\") fail(\"greet returned \" + JSON.stringify(a.greet(\"Bob\")));\nconsole.log(\"CYCLE-OK\");\n",
+      "run": "node __evalcheck.js",
+      "expectOut": "CYCLE-OK"
+    }
+  },
+  {
+    "id": "adv-ts-middleware",
+    "bucket": "feature",
+    "language": "ts",
+    "prompt": "Add error-handling middleware (4-arg functions catch downstream errors as 500) and a 404 default to this mini server. No dependencies allowed.",
+    "files": {
+      "server.js": "class Mini {\n  constructor() {\n    this.stack = [];\n  }\n  use(fn) {\n    this.stack.push(fn);\n  }\n  handle(req) {\n    const res = { statusCode: 200, body: \"\" };\n    for (const fn of this.stack) {\n      fn(req, res);\n    }\n    return res;\n  }\n}\n\nmodule.exports = { Mini };\n"
+    },
+    "expect": "500",
+    "verify": {
+      "file": "__evalcheck.js",
+      "content": "const { Mini } = require(\"./server.js\");\nconst fail = (m) => { console.error(\"FAIL: \" + m); process.exit(1); };\nconst app = new Mini();\napp.use((req, res) => { res.body = \"hello\"; });\napp.use((req, res) => { throw new Error(\"boom\"); });\napp.use((err, req, res) => { res.statusCode = 500; res.body = \"caught:\" + err.message; });\nconst r1 = app.handle({});\nif (r1.statusCode !== 500 || r1.body !== \"caught:boom\") fail(\"error middleware broken: \" + JSON.stringify(r1));\nconst bare = new Mini();\nconst r2 = bare.handle({});\nif (r2.statusCode !== 404) fail(\"default should be 404, got \" + r2.statusCode);\nconst ok = new Mini();\nok.use((req, res) => { res.body = \"fine\"; });\nconst r3 = ok.handle({});\nif (r3.statusCode !== 200 || r3.body !== \"fine\") fail(\"normal path broken\");\nconsole.log(\"MIDDLEWARE-OK\");\n",
+      "run": "node __evalcheck.js",
+      "expectOut": "MIDDLEWARE-OK"
+    }
+  },
+  {
+    "id": "adv-ts-emitter",
+    "bucket": "feature",
+    "language": "ts",
+    "prompt": "This emitter only has on/emit. Add once, off, and snapshot semantics so removing a listener mid-emit does not affect the current emission.",
+    "files": {
+      "emitter.js": "class Emitter {\n  constructor() {\n    this.handlers = {};\n  }\n  on(event, fn) {\n    (this.handlers[event] = this.handlers[event] || []).push(fn);\n  }\n  emit(event, data) {\n    for (const fn of this.handlers[event] || []) {\n      fn(data);\n    }\n  }\n}\n\nmodule.exports = { Emitter };\n"
+    },
+    "expect": "once",
+    "verify": {
+      "file": "__evalcheck.js",
+      "content": "const { Emitter } = require(\"./emitter.js\");\nconst fail = (m) => { console.error(\"FAIL: \" + m); process.exit(1); };\nconst e = new Emitter();\nconst seen = [];\ne.on(\"x\", (v) => seen.push(\"a\" + v));\nlet count = 0;\ne.once(\"x\", () => { count++; });\ne.emit(\"x\", 1);\ne.emit(\"x\", 2);\nif (count !== 1) fail(\"once fired \" + count + \" times\");\nif (seen.join(\",\") !== \"a1,a2\") fail(\"on broken: \" + seen);\nconst e2 = new Emitter();\nconst order = [];\nconst drop = (v) => { order.push(\"drop\"); e2.off(\"y\", keep); };\nconst keep = (v) => { order.push(\"keep\"); };\ne2.on(\"y\", drop);\ne2.on(\"y\", keep);\ne2.emit(\"y\");\nif (order.join(\",\") !== \"drop,keep\") fail(\"snapshot broken (mid-emit removal affected emission): \" + order);\norder.length = 0;\ne2.emit(\"y\");\nif (order.join(\",\") !== \"drop\") fail(\"off did not remove keep (only drop should remain): \" + order);\nconsole.log(\"EMITTER-OK\");\n",
+      "run": "node __evalcheck.js",
+      "expectOut": "EMITTER-OK"
+    }
+  },
+  {
+    "id": "adv-ts-config-merge",
+    "bucket": "bugfix",
+    "language": "ts",
+    "prompt": "Merging user config corrupts the defaults object and mangles arrays. Fix merge() so defaults stay pristine, nested objects deep-merge, and arrays replace instead of concatenating.",
+    "files": {
+      "defaults.js": "const defaults = {\n  port: 3000,\n  db: { host: \"localhost\", opts: { pool: 5 } },\n  plugins: [\"base\"],\n};\n\nmodule.exports = { defaults };\n",
+      "config.js": "const { defaults } = require(\"./defaults.js\");\n\nfunction merge(user) {\n  const out = Object.assign(defaults, user);\n  if (user.db) Object.assign(out.db, user.db);\n  if (user.plugins) out.plugins = out.plugins.concat(user.plugins);\n  return out;\n}\n\nmodule.exports = { merge };\n"
+    },
+    "expect": "merge",
+    "verify": {
+      "file": "__evalcheck.js",
+      "content": "const { defaults } = require(\"./defaults.js\");\nconst { merge } = require(\"./config.js\");\nconst fail = (m) => { console.error(\"FAIL: \" + m); process.exit(1); };\nconst before = JSON.stringify(defaults);\nconst out = merge({ port: 8080, db: { opts: { pool: 10 } }, plugins: [\"extra\"] });\nif (out.port !== 8080) fail(\"port not overridden\");\nif (out.db.host !== \"localhost\" || out.db.opts.pool !== 10) fail(\"deep merge broken: \" + JSON.stringify(out.db));\nif (JSON.stringify(out.plugins) !== '[\"extra\"]') fail(\"arrays must replace, got \" + JSON.stringify(out.plugins));\nif (JSON.stringify(defaults) !== before) fail(\"defaults mutated: \" + JSON.stringify(defaults));\nconst out2 = merge({});\nif (out2 === defaults) fail(\"must return a fresh object\");\nconsole.log(\"MERGE-OK\");\n",
+      "run": "node __evalcheck.js",
+      "expectOut": "MERGE-OK"
+    }
+  },
+  {
+    "id": "adv-ts-paginate",
+    "bucket": "feature",
+    "language": "ts",
+    "prompt": "listUsers ignores the cursor and always returns the first page. Implement opaque base64 cursor pagination over the store with a configurable limit.",
+    "files": {
+      "store.js": "const users = Array.from({ length: 53 }, (_, i) => ({ id: i + 1, name: \"user\" + (i + 1) }));\n\nmodule.exports = { users };\n",
+      "api.js": "const { users } = require(\"./store.js\");\n\nfunction listUsers({ cursor, limit = 10 } = {}) {\n  return { items: users.slice(0, limit), nextCursor: null };\n}\n\nmodule.exports = { listUsers };\n"
+    },
+    "expect": "Buffer",
+    "verify": {
+      "file": "__evalcheck.js",
+      "content": "const { listUsers } = require(\"./api.js\");\nconst fail = (m) => { console.error(\"FAIL: \" + m); process.exit(1); };\nlet cursor;\nconst seen = [];\nlet pages = 0;\nfor (;;) {\n  const r = listUsers({ cursor, limit: 10 });\n  if (!Array.isArray(r.items) || r.items.length === 0) fail(\"empty page\");\n  seen.push(...r.items.map((u) => u.id));\n  pages++;\n  if (pages > 10) fail(\"never terminates\");\n  if (r.nextCursor == null) break;\n  if (typeof r.nextCursor !== \"string\" || r.nextCursor.includes(\"user\")) fail(\"cursor not opaque\");\n  cursor = r.nextCursor;\n}\nif (seen.length !== 53) fail(\"expected 53 users, got \" + seen.length);\nif (new Set(seen).size !== 53) fail(\"duplicates across pages\");\nif (seen[0] !== 1 || seen[52] !== 53) fail(\"wrong order\");\nconsole.log(\"PAGINATE-OK\");\n",
+      "run": "node __evalcheck.js",
+      "expectOut": "PAGINATE-OK"
+    }
+  },
+  {
+    "id": "adv-ts-extract-validate",
+    "bucket": "refactor",
+    "language": "ts",
+    "prompt": "This route handler mixes validation with logic and is getting untestable. Extract the validation into validators.js as pure functions and rewire the handler to use them. Behavior must not change.",
+    "files": {
+      "handler.js": "function handle(body) {\n  if (!body || typeof body !== \"object\") {\n    return { status: 400, error: \"bad body\" };\n  }\n  if (typeof body.name !== \"string\" || body.name.trim() === \"\") {\n    return { status: 400, error: \"bad name\" };\n  }\n  if (!Number.isInteger(body.age) || body.age < 0 || body.age > 150) {\n    return { status: 400, error: \"bad age\" };\n  }\n  if (body.email !== undefined && !/^[^@]+@[^@]+$/.test(body.email)) {\n    return { status: 400, error: \"bad email\" };\n  }\n  const tag = body.name.trim().toLowerCase().replace(/\\s+/g, \"-\");\n  return { status: 200, user: { name: body.name.trim(), age: body.age, tag } };\n}\n\nmodule.exports = { handle };\n"
+    },
+    "expect": "validators",
+    "verify": {
+      "file": "__evalcheck.js",
+      "content": "const fs = require(\"fs\");\nconst fail = (m) => { console.error(\"FAIL: \" + m); process.exit(1); };\nif (!fs.existsSync(\"validators.js\")) fail(\"validators.js not created\");\nconst v = require(\"./validators.js\");\nconst { handle } = require(\"./handler.js\");\nif (typeof v !== \"object\") fail(\"validators must export functions\");\nconst h = fs.readFileSync(\"handler.js\", \"utf8\");\nif (!/require\\([\"']\\.\\/validators/.test(h)) fail(\"handler does not use validators.js\");\nconst good = handle({ name: \"Ann Lee\", age: 30 });\nif (good.status !== 200 || good.user.tag !== \"ann-lee\") fail(\"valid input broken: \" + JSON.stringify(good));\nfor (const bad of [null, {}, { name: \"\" }, { name: \"x\", age: -1 }, { name: \"x\", age: 30, email: \"nope\" }]) {\n  const r = handle(bad);\n  if (r.status !== 400) fail(\"invalid input accepted: \" + JSON.stringify(bad));\n}\nconsole.log(\"EXTRACT-OK\");\n",
+      "run": "node __evalcheck.js",
+      "expectOut": "EXTRACT-OK"
+    }
+  },
+  {
+    "id": "adv-ts-event-tests",
+    "bucket": "tests",
+    "language": "ts",
+    "prompt": "Write executable tests in event-types.test.js using only node:assert that cover subscribe, unsubscribe, once, and listener-error propagation for this emitter. They must run green with plain node.",
+    "files": {
+      "emitter.js": "class Emitter {\n  constructor() {\n    this.handlers = {};\n  }\n  on(event, fn) {\n    (this.handlers[event] = this.handlers[event] || []).push(fn);\n    return () => this.off(event, fn);\n  }\n  once(event, fn) {\n    const wrap = (d) => { this.off(event, wrap); fn(d); };\n    this.on(event, wrap);\n  }\n  off(event, fn) {\n    this.handlers[event] = (this.handlers[event] || []).filter((f) => f !== fn);\n  }\n  emit(event, data) {\n    for (const fn of [...(this.handlers[event] || [])]) {\n      fn(data);\n    }\n  }\n}\n\nmodule.exports = { Emitter };\n"
+    },
+    "expect": "node:assert",
+    "verify": {
+      "file": "__evalcheck.js",
+      "content": "const fs = require(\"fs\");\nconst fail = (m) => { console.error(\"FAIL: \" + m); process.exit(1); };\nif (!fs.existsSync(\"event-types.test.js\")) fail(\"test file not created\");\nconst src = fs.readFileSync(\"event-types.test.js\", \"utf8\");\nfor (const kw of [\"once(\", \"off(\", \"on(\"]) {\n  if (!src.includes(kw)) fail(\"test file missing coverage: \" + kw);\n}\nif (!/node:assert|require\\([\"']assert[\"']\\)/.test(src)) fail(\"must use node assert\");\nconsole.log(\"TESTFILE-OK\");\n",
+      "run": "node event-types.test.js && node __evalcheck.js",
+      "expectOut": "TESTFILE-OK"
+    }
+  },
+  {
+    "id": "adv-ts-shared-types",
+    "bucket": "refactor",
+    "language": "ts",
+    "prompt": "The user and order factories are copy-pasted across three modules and have already drifted. Deduplicate them into types.js and make every module import from it.",
+    "files": {
+      "user.js": "function createUser(name) {\n  return { kind: \"user\", name, tags: [] };\n}\n\nfunction describe(u) {\n  return \"user:\" + u.name;\n}\n\nmodule.exports = { createUser, describe };\n",
+      "order.js": "function createUser(name) {\n  return { kind: \"user\", name };\n}\n\nfunction createOrder(id, user) {\n  return { kind: \"order\", id, user, total: 0 };\n}\n\nmodule.exports = { createUser, createOrder };\n",
+      "api.js": "function createOrder(id, user) {\n  return { kind: \"order\", id, user, total: 0, currency: \"USD\" };\n}\n\nfunction summarize(o) {\n  return o.id + \":\" + o.total;\n}\n\nmodule.exports = { createOrder, summarize };\n"
+    },
+    "expect": "types.js",
+    "verify": {
+      "file": "__evalcheck.js",
+      "content": "const fs = require(\"fs\");\nconst fail = (m) => { console.error(\"FAIL: \" + m); process.exit(1); };\nif (!fs.existsSync(\"types.js\")) fail(\"types.js not created\");\nconst t = require(\"./types.js\");\nif (typeof t.createUser !== \"function\" || typeof t.createOrder !== \"function\") fail(\"types.js must export both factories\");\nfor (const f of [\"user.js\", \"order.js\", \"api.js\"]) {\n  const src = fs.readFileSync(f, \"utf8\");\n  if (!/require\\([\"']\\.\\/types\\.js?[\"']\\)/.test(src)) fail(f + \" does not import types.js\");\n}\nconst count = [\"user.js\", \"order.js\", \"api.js\", \"types.js\"]\n  .map((f) => fs.readFileSync(f, \"utf8\"))\n  .join(\"\\n\").match(/function createUser/g) || [];\nif (count.length !== 1) fail(\"createUser defined \" + count.length + \" times\");\nconst u = t.createUser(\"ann\");\nif (u.kind !== \"user\" || u.name !== \"ann\") fail(\"factory broken\");\nconsole.log(\"TYPES-OK\");\n",
+      "run": "node __evalcheck.js",
+      "expectOut": "TYPES-OK"
+    }
+  },
+  {
+    "id": "adv-py-retry",
+    "bucket": "feature",
+    "language": "py",
+    "prompt": "Implement the retry decorator: N attempts, exponential backoff with jitter, retry only configured exceptions, and injectable sleep/jitter functions so it stays testable without real waiting.",
+    "files": {
+      "retry.py": "import functools\n\n\ndef retry(attempts=3, base=0.1, exceptions=(Exception,), sleep=None, jitter=None):\n    def deco(fn):\n        @functools.wraps(fn)\n        def wrapper(*a, **k):\n            return fn(*a, **k)\n        return wrapper\n    return deco\n"
+    },
+    "expect": "backoff",
+    "timeoutSec": 240,
+    "verify": {
+      "file": "__evalcheck.py",
+      "content": "from retry import retry\n\ncalls = []\n\ndef fake_sleep(s):\n    calls.append((\"sleep\", s))\n\ndef fake_jitter(v):\n    calls.append((\"jitter\", v))\n    return v * 0.5\n\ntries = []\n\n@retry(attempts=3, base=0.1, exceptions=(ValueError,), sleep=fake_sleep, jitter=fake_jitter)\ndef flaky():\n    tries.append(1)\n    if len(tries) < 3:\n        raise ValueError(\"boom\")\n    return \"ok\"\n\nassert flaky() == \"ok\", \"should succeed on 3rd try\"\nassert len(tries) == 3, f\"expected 3 tries, got {len(tries)}\"\nsleeps = [s for k, s in calls if k == \"sleep\"]\nassert len(sleeps) == 2, f\"expected 2 sleeps, got {sleeps}\"\nassert 0 < sleeps[0] <= 0.1, f\"first delay out of range: {sleeps}\"\nassert 0 < sleeps[1] <= 0.2, f\"second delay out of range: {sleeps}\"\nassert sleeps[1] >= sleeps[0], f\"delays should grow: {sleeps}\"\n\nstruck = []\n\n@retry(attempts=4, base=0.1, exceptions=(ValueError,), sleep=fake_sleep, jitter=fake_jitter)\ndef fatal():\n    struck.append(1)\n    raise TypeError(\"not retryable\")\n\ntry:\n    fatal()\n    raise AssertionError(\"should have raised\")\nexcept TypeError:\n    pass\nassert len(struck) == 1, \"non-retryable must raise immediately\"\n\nwins = []\n\n@retry(attempts=3, base=0.1, sleep=fake_sleep, jitter=fake_jitter)\ndef immediate():\n    wins.append(1)\n    return 7\n\nassert immediate() == 7 and len(wins) == 1, \"success must not retry\"\nprint(\"RETRY-OK\")\n",
+      "run": "python __evalcheck.py",
+      "expectOut": "RETRY-OK"
+    }
+  },
+  {
+    "id": "adv-py-lru",
+    "bucket": "bugfix",
+    "language": "py",
+    "prompt": "This LRU cache evicts the wrong entries: recently used keys disappear while stale ones stay. Fix the recency bookkeeping in both get and put.",
+    "files": {
+      "lru.py": "from collections import OrderedDict\n\n\nclass LRUCache:\n    def __init__(self, capacity):\n        self.capacity = capacity\n        self.data = OrderedDict()\n\n    def get(self, key):\n        if key not in self.data:\n            return None\n        return self.data[key]\n\n    def put(self, key, value):\n        if key in self.data:\n            self.data[key] = value\n            return\n        if len(self.data) >= self.capacity:\n            self.data.popitem(last=True)\n        self.data[key] = value\n",
+      "app.py": "from lru import LRUCache\n\ncache = LRUCache(2)\ncache.put(\"a\", 1)\ncache.put(\"b\", 2)\nprint(cache.get(\"a\"))\ncache.put(\"c\", 3)\nprint(cache.get(\"a\"), cache.get(\"b\"))\n"
+    },
+    "expect": "move_to_end",
+    "verify": {
+      "file": "__evalcheck.py",
+      "content": "from lru import LRUCache\n\nc = LRUCache(3)\nc.put(\"a\", 1)\nc.put(\"b\", 2)\nc.put(\"c\", 3)\nassert c.get(\"a\") == 1\nc.put(\"d\", 4)\nassert c.get(\"b\") is None, \"least-recently-used 'b' must go first\"\nassert c.get(\"c\") == 3, \"recently inserted 'c' must survive\"\nassert c.get(\"a\") == 1 and c.get(\"d\") == 4\nc.put(\"a\", 10)\nassert c.get(\"a\") == 10, \"update must keep value\"\nc.put(\"e\", 5)\nassert c.get(\"c\") is None, \"LRU order wrong after update\"\nassert c.get(\"d\") == 4 and c.get(\"a\") == 10 and c.get(\"e\") == 5\nprint(\"LRU-OK\")\n",
+      "run": "python __evalcheck.py",
+      "expectOut": "LRU-OK"
+    }
+  },
+  {
+    "id": "adv-py-csvstats",
+    "bucket": "feature",
+    "language": "py",
+    "prompt": "Build a streaming per-group CSV aggregator (count/mean/min/max) that tolerates malformed rows and reports how many it skipped. No third-party packages.",
+    "files": {
+      "stats.py": "import csv\n\n\ndef summarize(path):\n    groups = {}\n    skipped = 0\n    return {\"groups\": groups, \"skipped\": skipped}\n",
+      "data.csv": "group,value\nred,10\nred,20\nblue,5\nred,not-a-number\nblue,15\ngreen,\n,7\nblue,25\nred,30\n"
+    },
+    "expect": "mean",
+    "verify": {
+      "file": "__evalcheck.py",
+      "content": "from stats import summarize\n\nr = summarize(\"data.csv\")\ng = r[\"groups\"]\nassert g[\"red\"][\"count\"] == 3, g\nassert g[\"red\"][\"mean\"] == 20, g\nassert g[\"red\"][\"min\"] == 10 and g[\"red\"][\"max\"] == 30, g\nassert g[\"blue\"][\"count\"] == 3, g\nassert g[\"blue\"][\"mean\"] == 15, g\nassert \"green\" not in g, f\"empty value row must be skipped: {g}\"\nassert r[\"skipped\"] == 3, f\"expected 3 skipped rows, got {r['skipped']}\"\nprint(\"CSV-OK\")\n",
+      "run": "python __evalcheck.py",
+      "expectOut": "CSV-OK"
+    }
+  },
+  {
+    "id": "adv-py-shadow",
+    "bucket": "bugfix",
+    "language": "py",
+    "prompt": "`import json` in app.py is picking up the wrong module and dumps() is missing. Diagnose the shadowing and fix the imports properly.",
+    "files": {
+      "json.py": "def helper(data):\n    return sorted(data)\n",
+      "app.py": "import json\nfrom json import helper\n\nprint(json.dumps({\"b\": 1, \"a\": 2}, sort_keys=True))\nprint(helper([3, 1, 2]))\n"
+    },
+    "expect": "jsonutil",
+    "verify": {
+      "file": "__evalcheck.py",
+      "content": "import os\n\nassert not os.path.exists(\"json.py\"), \"shadowing json.py must be renamed\"\nimport app  # noqa: F401  (must import without shadowing errors)\nimport json as stdlib\n\nassert hasattr(stdlib, \"dumps\"), \"stdlib json must win\"\nprint(\"SHADOW-OK\")\n",
+      "run": "python __evalcheck.py",
+      "expectOut": "SHADOW-OK"
+    }
+  },
+  {
+    "id": "adv-py-config",
+    "bucket": "refactor",
+    "language": "py",
+    "prompt": "Replace the three hand-rolled dict configs with validated dataclasses in config.py (reject bad values loudly) and rewire every module to use them. Behavior for valid configs must not change.",
+    "files": {
+      "settings.py": "CONFIG = {\"debug\": False, \"workers\": 4}\n\n\ndef is_debug():\n    return CONFIG[\"debug\"]\n",
+      "db.py": "DB = {\"host\": \"localhost\", \"port\": 5432, \"pool\": 5}\n\n\ndef dsn():\n    return f\"postgres://{DB['host']}:{DB['port']}/app?pool={DB['pool']}\"\n",
+      "cache.py": "CACHE = {\"ttl\": 60, \"max_entries\": 1000}\n\n\ndef ttl():\n    return CACHE[\"ttl\"]\n"
+    },
+    "expect": "dataclass",
+    "verify": {
+      "file": "__evalcheck.py",
+      "content": "import config\nimport settings\nimport db\nimport cache\n\nassert settings.is_debug() is False\nassert db.dsn() == \"postgres://localhost:5432/app?pool=5\", db.dsn()\nassert cache.ttl() == 60\nbad = 0\nfor make in [\n    lambda: config.AppConfig(debug=\"yes\", workers=4),\n    lambda: config.AppConfig(debug=False, workers=0),\n    lambda: config.DbConfig(host=\"h\", port=99999, pool=5),\n    lambda: config.CacheConfig(ttl=-1, max_entries=10),\n]:\n    try:\n        make()\n    except (ValueError, TypeError):\n        bad += 1\nassert bad == 4, f\"validation must reject all 4 bad configs, rejected {bad}\"\nprint(\"CONFIG-OK\")\n",
+      "run": "python __evalcheck.py",
+      "expectOut": "CONFIG-OK"
+    }
+  },
+  {
+    "id": "adv-py-plugins",
+    "bucket": "feature",
+    "language": "py",
+    "prompt": "Build the plugin registry: register by name, lazily load modules on first use via importlib, and refuse duplicate names loudly. Two sample plugins are provided.",
+    "files": {
+      "registry.py": "PLUGINS = {}\n\n\ndef register(name, module):\n    PLUGINS[name] = module\n\n\ndef get(name):\n    return PLUGINS[name]\n",
+      "plugins/a.py": "NAME = \"alpha\"\n\n\ndef run(x):\n    return x * 2\n",
+      "plugins/b.py": "NAME = \"beta\"\n\n\ndef run(x):\n    return x + 10\n"
+    },
+    "expect": "importlib",
+    "verify": {
+      "file": "__evalcheck.py",
+      "content": "import sys\nimport registry\n\nfor mod in [\"plugins.a\", \"plugins.b\"]:\n    assert mod not in sys.modules, f\"{mod} must load lazily\"\nregistry.register(\"alpha\", \"plugins.a\")\nregistry.register(\"beta\", \"plugins.b\")\nassert \"plugins.a\" not in sys.modules, \"registration must not import yet\"\nassert registry.get(\"alpha\").run(21) == 42\nassert registry.get(\"beta\").run(5) == 15\ntry:\n    registry.register(\"alpha\", \"plugins.b\")\n    raise AssertionError(\"duplicate name must raise\")\nexcept (ValueError, KeyError):\n    pass\nprint(\"PLUGINS-OK\")\n",
+      "run": "python __evalcheck.py",
+      "expectOut": "PLUGINS-OK"
+    }
+  },
+  {
+    "id": "adv-py-migrate",
+    "bucket": "refactor",
+    "language": "py",
+    "prompt": "Migrate all three modules off the deprecated OldClient onto NewClient (different method names and signatures). No OldClient usage may remain.",
+    "files": {
+      "oldclient.py": "class OldClient:\n    def fetch(self, resource, limit=10):\n        return [f\"{resource}:{i}\" for i in range(limit)]\n",
+      "newclient.py": "class NewClient:\n    def __init__(self, timeout=5):\n        self.timeout = timeout\n\n    def get_resource(self, name, *, count):\n        return [f\"{name}:{i}\" for i in range(count)]\n",
+      "orders.py": "from oldclient import OldClient\n\nclient = OldClient()\n\n\ndef recent(n=5):\n    return client.fetch(\"orders\", limit=n)\n",
+      "users.py": "from oldclient import OldClient\n\nclient = OldClient()\n\n\ndef active(n=5):\n    return client.fetch(\"users\", limit=n)\n",
+      "billing.py": "from oldclient import OldClient\n\nclient = OldClient()\n\n\ndef invoices(n=5):\n    return client.fetch(\"invoices\", limit=n)\n"
+    },
+    "expect": "from newclient import|import newclient",
+    "verify": {
+      "file": "__evalcheck.py",
+      "content": "import orders\nimport users\nimport billing\n\nassert orders.recent(2) == [\"orders:0\", \"orders:1\"], orders.recent(2)\nassert users.active(2) == [\"users:0\", \"users:1\"]\nassert billing.invoices(2) == [\"invoices:0\", \"invoices:1\"]\nimport subprocess\n\nout = subprocess.run([\"python\", \"-c\", \"import orders, users, billing\"], capture_output=True, text=True)\nassert out.returncode == 0, out.stderr\nfor f in [\"orders.py\", \"users.py\", \"billing.py\"]:\n    src = open(f).read()\n    assert \"OldClient\" not in src and \"oldclient\" not in src, f\"old client remains in {f}\"\nprint(\"MIGRATE-OK\")\n",
+      "run": "python __evalcheck.py",
+      "expectOut": "MIGRATE-OK"
+    }
+  },
+  {
+    "id": "adv-go-pool",
+    "bucket": "feature",
+    "language": "go",
+    "prompt": "Implement a bounded worker pool: N workers, queued jobs, results in submission order, and prompt return when the context is cancelled. No third-party packages.",
+    "files": {
+      "go.mod": "module evaltask\n\ngo 1.21\n",
+      "pool.go": "package main\n\nimport \"context\"\n\n// Pool runs submitted jobs on N workers.\ntype Pool struct{}\n\n// New creates a pool with n workers and the given queue size.\nfunc New(n, queue int) *Pool {\n\treturn &Pool{}\n}\n\n// Submit queues a job; it blocks while the queue is full.\n// Results arrive in submission order. A cancelled context aborts early.\nfunc (p *Pool) Submit(ctx context.Context, jobs []func() int) ([]int, error) {\n\treturn nil, nil\n}\n\n// Shutdown stops the workers.\nfunc (p *Pool) Shutdown() {}\n",
+      "main.go": "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"pool demo\")\n}\n"
+    },
+    "expect": "go func",
+    "timeoutSec": 300,
+    "maxIterations": 20,
+    "verify": {
+      "file": "evalcheck_test.go",
+      "content": "package main\n\nimport (\n  \"context\"\n  \"errors\"\n  \"testing\"\n  \"time\"\n)\n\nfunc TestEvalCheckResults(t *testing.T) {\n  p := New(4, 16)\n  defer p.Shutdown()\n  jobs := make([]func() int, 20)\n  for i := range jobs {\n    i := i\n    jobs[i] = func() int { time.Sleep(time.Duration(20-i) * time.Millisecond); return i * 2 }\n  }\n  got, err := p.Submit(context.Background(), jobs)\n  if err != nil {\n    t.Fatalf(\"submit: %v\", err)\n  }\n  if len(got) != 20 {\n    t.Fatalf(\"got %d results\", len(got))\n  }\n  for i, v := range got {\n    if v != i*2 {\n      t.Fatalf(\"result %d = %d, want %d (order)\", i, v, i*2)\n    }\n  }\n}\n\nfunc TestEvalCheckCancel(t *testing.T) {\n  p := New(1, 1)\n  defer p.Shutdown()\n  ctx, cancel := context.WithCancel(context.Background())\n  cancel()\n  jobs := []func() int{func() int { time.Sleep(5 * time.Second); return 1 }}\n  _, err := p.Submit(ctx, jobs)\n  if !errors.Is(err, context.Canceled) {\n    t.Fatalf(\"expected context.Canceled, got %v\", err)\n  }\n}\n",
+      "run": "go test -count=1 -run TestEvalCheck .",
+      "expectOut": "ok"
+    }
+  },
+  {
+    "id": "adv-go-errwrap",
+    "bucket": "bugfix",
+    "language": "go",
+    "prompt": "Callers can no longer detect ErrNotFound with errors.Is after it passes through the service layer. Find where the chain breaks and fix it.",
+    "files": {
+      "go.mod": "module evaltask\n\ngo 1.21\n",
+      "db.go": "package main\n\nimport \"errors\"\n\nvar ErrNotFound = errors.New(\"not found\")\n\nfunc lookup(id string) (string, error) {\n\tif id == \"\" {\n\t\treturn \"\", ErrNotFound\n\t}\n\treturn \"row:\" + id, nil\n}\n",
+      "service.go": "package main\n\nimport \"fmt\"\n\nfunc Get(id string) (string, error) {\n\trow, err := lookup(id)\n\tif err != nil {\n\t\treturn \"\", fmt.Errorf(\"service: %v\", err)\n\t}\n\treturn row, nil\n}\n",
+      "main.go": "package main\n\nimport \"fmt\"\n\nfunc main() {\n\trow, err := Get(\"a\")\n\tfmt.Println(row, err)\n}\n"
+    },
+    "expect": "%w",
+    "verify": {
+      "file": "evalcheck_test.go",
+      "content": "package main\n\nimport (\n  \"errors\"\n  \"testing\"\n)\n\nfunc TestEvalCheckSentinel(t *testing.T) {\n  _, err := Get(\"\")\n  if !errors.Is(err, ErrNotFound) {\n    t.Fatalf(\"chain lost ErrNotFound: %v\", err)\n  }\n  if row, err := Get(\"a\"); err != nil || row != \"row:a\" {\n    t.Fatalf(\"happy path broken: %q %v\", row, err)\n  }\n}\n",
+      "run": "go test -count=1 -run TestEvalCheck .",
+      "expectOut": "ok"
+    }
+  },
+  {
+    "id": "adv-go-rename",
+    "bucket": "rename",
+    "language": "go",
+    "prompt": "Rename the Store interface to Repository everywhere it is declared, implemented, and used. The module must still build.",
+    "files": {
+      "go.mod": "module evaltask\n\ngo 1.21\n",
+      "store.go": "package main\n\n// Store persists widgets.\ntype Store interface {\n\tSave(id string) error\n\tLoad(id string) (string, error)\n}\n\ntype memStore struct {\n\tdata map[string]string\n}\n\nfunc (m *memStore) Save(id string) error {\n\tm.data[id] = id\n\treturn nil\n}\n\nfunc (m *memStore) Load(id string) (string, error) {\n\treturn m.data[id], nil\n}\n",
+      "service.go": "package main\n\ntype Service struct {\n\tStore Store\n}\n\nfunc (s *Service) RoundTrip(id string) (string, error) {\n\tif err := s.Store.Save(id); err != nil {\n\t\treturn \"\", err\n\t}\n\treturn s.Store.Load(id)\n}\n",
+      "main.go": "package main\n\nimport \"fmt\"\n\nfunc main() {\n\ts := &Service{Store: &memStore{data: map[string]string{}}}\n\trow, _ := s.RoundTrip(\"a\")\n\tfmt.Println(row)\n}\n"
+    },
+    "expect": "Repository",
+    "verify": {
+      "file": "evalcheck.js",
+      "content": "const fs = require(\"fs\");\nconst fail = (m) => { console.error(\"FAIL: \" + m); process.exit(1); };\nfor (const f of [\"store.go\", \"service.go\"]) {\n  const src = fs.readFileSync(f, \"utf8\");\n  if (!src.includes(\"Repository\")) fail(f + \" missing Repository\");\n  if (/type\\s+Store\\s+interface/.test(src)) fail(f + \" still declares Store\");\n  if (/Store\\s+Store\\b/.test(src)) fail(f + \" still references Store type\");\n}\nconsole.log(\"RENAME-GO-OK\");\n",
+      "run": "go build ./... && node evalcheck.js",
+      "expectOut": "RENAME-GO-OK"
+    }
+  },
+  {
+    "id": "adv-go-limiter",
+    "bucket": "feature",
+    "language": "go",
+    "prompt": "Implement the token-bucket limiter with an injectable Clock so tests never sleep for real. Bursts up to capacity pass; sustained use is throttled; time advancing refills.",
+    "files": {
+      "go.mod": "module evaltask\n\ngo 1.21\n",
+      "limiter.go": "package main\n\nimport \"time\"\n\n// Clock is satisfied by time.Time plumbing in production and fakes in tests.\ntype Clock interface {\n\tNow() time.Time\n}\n\ntype sysClock struct{}\n\nfunc (sysClock) Now() time.Time { return time.Now() }\n\n// Limiter allows `rate` events per second with bursts up to `burst`.\ntype Limiter struct{}\n\n// NewLimiter builds a limiter using the given clock.\nfunc NewLimiter(rate float64, burst int, clock Clock) *Limiter {\n\treturn &Limiter{}\n}\n\n// Allow reports whether one event may proceed now.\nfunc (l *Limiter) Allow() bool {\n\treturn true\n}\n",
+      "main.go": "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tl := NewLimiter(2, 2, sysClock{})\n\tfmt.Println(l.Allow())\n}\n"
+    },
+    "expect": "refill",
+    "timeoutSec": 300,
+    "maxIterations": 20,
+    "verify": {
+      "file": "evalcheck_test.go",
+      "content": "package main\n\nimport (\n  \"testing\"\n  \"time\"\n)\n\ntype fakeClock struct{ t time.Time }\n\nfunc (f *fakeClock) Now() time.Time { return f.t }\n\nfunc TestEvalCheckLimiter(t *testing.T) {\n  fc := &fakeClock{t: time.Now()}\n  l := NewLimiter(2, 3, fc)\n  for i := 0; i < 3; i++ {\n    if !l.Allow() {\n      t.Fatalf(\"burst event %d denied\", i)\n    }\n  }\n  if l.Allow() {\n    t.Fatal(\"sustained use must throttle\")\n  }\n  fc.t = fc.t.Add(1500 * time.Millisecond)\n  if !l.Allow() {\n    t.Fatal(\"refill after 1.5s at rate 2/s must allow\")\n  }\n}\n",
+      "run": "go test -count=1 -run TestEvalCheck .",
+      "expectOut": "ok"
+    }
+  }
+]

@@ -9,7 +9,7 @@ import {
   MissingApiKeyError,
   type ProviderOverrides,
 } from "../llm/provider.js";
-import { gitDiff, gitStatus, restoreShadowCheckpoint } from "../tools/git.js";
+import { gitDiff, gitStatus, isGitRepo, restoreShadowCheckpoint } from "../tools/git.js";
 import { deleteEnvKey, ensureEndpointForKey, globalEnvPath, upsertEnvKey } from "./config.js";
 
 // Re-exported for existing callers/tests; canonical home is ./config.js.
@@ -1769,12 +1769,18 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
       running = false;
     }
     try {
-      const status = await gitStatus(session.repoRoot);
-      if (status && status !== "(clean)" && !status.startsWith("fatal:")) {
-        console.log(c.dim("git status: ") + status.split("\n").slice(0, 5).join("\n"));
+      // Post-turn git footer: only in git repos with real changes.
+      // Previously printed "(not a git repository...)" after EVERY turn,
+      // including conversational ones — the UX bug from manual tests.
+      if (await isGitRepo(session.repoRoot)) {
+        const status = await gitStatus(session.repoRoot);
+        if (status && status !== "(clean)" && !status.startsWith("fatal:")
+          && !status.startsWith("(not a git repository")) {
+          console.log(c.dim("git status: ") + status.split("\n").slice(0, 5).join("\n"));
+        }
       }
     } catch {
-      // Non-git directory — not fatal.
+      // Non-git directory — not fatal, stay silent.
     }
     promptUser();
   }

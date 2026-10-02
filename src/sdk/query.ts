@@ -4,6 +4,7 @@ import { loadHooksSettings, loadModelSettings } from "../agent/settings.js";
 import { createProviderFromEnv } from "../llm/provider.js";
 import { resolveRoles } from "../llm/modelRouting.js";
 import type { AgentEvent } from "../llm/events.js";
+import type { RuntimeFlags } from "../agent/runtimeFlags.js";
 
 /**
  * HL-4: @codeagent/core SDK — query() async iterator yielding AgentEvents.
@@ -20,6 +21,8 @@ export interface QueryOptions {
   autoApprove?: boolean;
   allowedTools?: string[];
   resumeHistory?: unknown[];
+  /** Thin-runtime flags (eval ablation rows). Default off = baseline. */
+  flags?: RuntimeFlags;
 }
 
 export async function* query(task: string, opts: QueryOptions): AsyncGenerator<AgentEvent, { finalMessage: string }, void> {
@@ -51,6 +54,7 @@ export async function* query(task: string, opts: QueryOptions): AsyncGenerator<A
     baseURL: opts.baseURL,
     autoApprove: opts.autoApprove ?? false,
     modelRoles: roles,
+    flags: opts.flags,
     smallModel: modelSettings.smallModel,
     capabilitiesOverride: modelSettings.capabilities,
     hooks,

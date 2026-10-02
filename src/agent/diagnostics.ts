@@ -243,11 +243,29 @@ async function getGoDiagnostics(repoRoot: string, filePath: string): Promise<str
 }
 
 /** AG-10: Rust diagnostics via cargo check, filtered to the file. */
-async function getRustDiagnostics(repoRoot: string, filePath: string): Promise<string | null> {
+export async function getRustDiagnostics(repoRoot: string, filePath: string): Promise<string | null> {
   const out = await runBestEffort(`cargo check --message-format short`, repoRoot, 5000);
   if (!out) return null;
   const base = path.basename(filePath).toLowerCase();
   const hits = out.split("\n").filter((l) => l.toLowerCase().includes(base)).slice(0, 4);
   const shown = (hits.length ? hits : out.split("\n").slice(0, 4)).map((l) => `  - ${l}`).join("\n");
   return shown ? `⚠️ cargo check:\n${shown}` : null;
+}
+
+/**
+ * Phase 4D: `ruff check --fix` with no model turn. Runs only on files the
+ * agent wrote; the contract test runs again after the fix (caller reruns
+ * verification). Returns true when bytes changed. Best-effort, never throws.
+ */
+export async function runRuffFix(repoRoot: string, filePath: string): Promise<boolean> {
+  if (!filePath.endsWith(".py")) return false;
+  try {
+    const before = await fs.readFile(resolveInsideRepo(repoRoot, filePath), "utf8").catch(() => null);
+    if (before == null) return false;
+    await runBestEffort(`ruff check --fix ${JSON.stringify(filePath)}`, repoRoot, 5000);
+    const after = await fs.readFile(resolveInsideRepo(repoRoot, filePath), "utf8").catch(() => null);
+    return after != null && after !== before;
+  } catch {
+    return false;
+  }
 }

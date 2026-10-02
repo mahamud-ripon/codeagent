@@ -46,12 +46,18 @@ export interface ResponsesCreateResult {
     output: number;
     cachedInput?: number;
     costUsd?: number;
+    /** Null when the provider omits reasoning tokens (not zero). */
+    reasoningTokens?: number | null;
+    /** True when usage was estimated from text size. Never store silent 0. */
+    usageEstimated?: boolean;
   };
 }
 
 export interface ResponderOptions {
   tools?: boolean;
   signal?: AbortSignal;
+  /** Tool names to hide from the model (capability-aware exposure). */
+  exclude?: string[];
 }
 
 export type Responder = (input: unknown[], options?: ResponderOptions) => Promise<ResponsesCreateResult>;
@@ -63,13 +69,15 @@ export function createResponder(
   return async (input: unknown[], options?: ResponderOptions) => {
     const { tools } = await import("./tools.js");
     const useTools = options?.tools ?? true;
+    const exclude = options?.exclude ?? [];
+    const filtered = exclude.length > 0 ? tools.filter((t) => !exclude.includes(t.name)) : tools;
     const response = await withProviderRetry(
       () =>
         client.responses.create({
           model: args.model,
           instructions: args.instructions,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          tools: useTools ? (tools as any) : undefined,
+          tools: useTools ? (filtered as any) : undefined,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           input: input as any,
         }),

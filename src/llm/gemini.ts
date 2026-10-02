@@ -130,7 +130,7 @@ export function createGeminiProvider(opts: GeminiProviderOptions): Provider {
       const { toChatTools } = await import("./tools.js");
       const tools: GeminiTool[] = req.tools
         ? [{
-            functionDeclarations: (toChatTools() as Array<{ function: { name: string; description?: string; parameters?: unknown } }>).map(
+            functionDeclarations: (toChatTools({ exclude: req.exclude }) as Array<{ function: { name: string; description?: string; parameters?: unknown } }>).map(
               (t) => ({ name: t.function.name, description: t.function.description, parameters: t.function.parameters ?? { type: "object" } }),
             ),
           }]

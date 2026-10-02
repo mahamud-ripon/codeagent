@@ -14,14 +14,21 @@ export function isAmbiguousForIntent(prompt: string): boolean {
 
 export async function classifyIntentWithModel(prompt: string, fast?: Responder): Promise<AgentIntent> {
   const base = classifyIntent(prompt);
+  // Deterministic routing already decided non-task: trust it without
+  // spending a fast-model roundtrip (fixes 40s+ deliberation on trivia).
+  // Only ambiguous task-shaped prompts get a second opinion.
   if (!fast || !isAmbiguousForIntent(prompt)) return base;
+  // If regex already said conversational/external, don't override to task
+  // via model — cheap routing wins for trivial intent.
+  if (base === "conversational" || base === "external") return base;
   try {
     const res = await fast([
-      { role: "system", content: "Classify the user request as one word: conversational, inquiry, or task. Reply with only that word." },
+      { role: "system", content: "Classify the user request as one word: conversational, inquiry, external, or task. Reply with only that word." },
       { role: "user", content: prompt },
     ], { tools: false });
     const word = (res.output_text ?? "").trim().toLowerCase();
     if (word.includes("conversational")) return "conversational";
+    if (word.includes("external")) return "external";
     if (word.includes("inquiry")) return "inquiry";
     if (word.includes("task")) return "task";
     return base;

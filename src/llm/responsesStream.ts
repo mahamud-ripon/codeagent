@@ -102,6 +102,7 @@ export function createResponsesStreamProvider(opts: ResponsesStreamOptions): Pro
     capabilities: getModelCapabilities(opts.model),
     async *stream(req: StreamRequest): AsyncGenerator<ProviderEvent> {
       const { tools } = await import("./tools.js");
+      const filtered = req.exclude?.length ? tools.filter((t) => !req.exclude!.includes(t.name)) : tools;
       // ML-9: stable prefix order (system → history) so prompt-cache
       // prefixes stay stable across turns; cache-capable models keep
       // the long system prefix reusable server-side.
@@ -122,7 +123,7 @@ export function createResponsesStreamProvider(opts: ResponsesStreamOptions): Pro
             model: opts.model,
             instructions: systemText ?? ([opts.instructions, req.system].filter(Boolean).join("\n\n") || undefined),
             input: history.length ? history : req.messages,
-            tools: req.tools ? tools : undefined,
+            tools: req.tools ? filtered : undefined,
             stream: true,
           }),
           signal: req.signal,

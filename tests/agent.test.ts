@@ -176,6 +176,54 @@ describe("agent loop", () => {
     expect(result.history).toBeDefined();
   });
 
+  it("fast-paths exact greetings with zero model calls", async () => {
+    let calls = 0;
+    const responder: Responder = async () => {
+      calls++;
+      return { output: [], output_text: "should not be called" };
+    };
+    const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 10, responder, verbose: false });
+    const result = await agent.run("hello");
+    expect(calls).toBe(0);
+    expect(result.intent).toBe("conversational");
+    expect(result.iterations).toBe(0);
+    expect(result.finalMessage).toMatch(/What would you like/);
+  });
+
+  it("routes general knowledge to conversational without repo tools", async () => {
+    let calls = 0;
+    const responder: Responder = async (input) => {
+      calls++;
+      const dump = JSON.stringify(input);
+      expect(dump).not.toContain("<repository>");
+      expect(dump).not.toContain("<project_rules>");
+      return { output: [], output_text: "GitHub is a hosting platform for Git repos." };
+    };
+    const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 10, responder, verbose: false });
+    const result = await agent.run("what is github?");
+    expect(result.intent).toBe("conversational");
+    expect(calls).toBe(1);
+  });
+
+  it("returns explicit limitation for current-info when web is unavailable", async () => {
+    const prev = process.env.WEB_SEARCH_ENDPOINT;
+    delete process.env.WEB_SEARCH_ENDPOINT;
+    try {
+      let calls = 0;
+      const responder: Responder = async () => {
+        calls++;
+        return { output: [], output_text: "should not be called" };
+      };
+      const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 10, responder, verbose: false });
+      const result = await agent.run("which is latest claude model");
+      expect(result.intent).toBe("external");
+      expect(calls).toBe(0);
+      expect(result.finalMessage).toMatch(/Web access is unavailable/);
+    } finally {
+      if (prev !== undefined) process.env.WEB_SEARCH_ENDPOINT = prev;
+    }
+  });
+
   it("preserves conversation history across multi-turn interactions", async () => {
     let turn = 0;
     const responder: Responder = async (input) => {

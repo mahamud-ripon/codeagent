@@ -34,7 +34,7 @@ export interface AgentState {
   errors: string[];
 }
 
-export type AgentIntent = "conversational" | "inquiry" | "task";
+export type AgentIntent = "conversational" | "inquiry" | "task" | "external";
 
 export interface AgentRunResult {
   finalMessage: string;

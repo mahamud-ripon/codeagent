@@ -79,7 +79,7 @@ export function assertNotProtected(repoRelative: string): void {
   }
 }
 
-export async function listFiles(repoRoot: string, relative = "."): Promise<string> {
+export async function listFiles(repoRoot: string, relative = ".", hygieneOn = false): Promise<string> {
   const root = path.resolve(repoRoot);
   const startDir = resolveInsideRepo(root, relative);
 
@@ -117,7 +117,7 @@ export async function listFiles(repoRoot: string, relative = "."): Promise<strin
       return;
     }
     for (const entry of entries) {
-      if (isIgnoredDir(entry.name)) continue;
+      if (isIgnoredDir(entry.name, hygieneOn)) continue;
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         await walk(full);
@@ -261,6 +261,29 @@ export async function writeFile(
 
 export interface EditOptions {
   replaceAll?: boolean;
+  /** Phase 2 economy: return ~40 lines around the change, not just "Edited path". */
+  snippet?: boolean;
+  /** Phase 2 hygiene: on stale old_text, include current snippet so no extra read turn is needed. */
+  rebase?: boolean;
+}
+
+function formatSnippetLines(content: string, centerLine: number, context = 20): string {
+  const lines = content.split(/\r?\n/);
+  const total = lines.length;
+  const start = Math.max(1, centerLine - context);
+  const end = Math.min(total, centerLine + context);
+  const width = String(end).length;
+  const out: string[] = [`[Snippet: lines ${start}-${end} of ${total}]`];
+  for (let i = start; i <= end; i++) {
+    out.push(`${String(i).padStart(width, " ")} | ${lines[i - 1]}`);
+  }
+  return out.join("\n");
+}
+
+function findCenterLine(content: string, needle: string): number {
+  const idx = content.indexOf(needle.slice(0, Math.min(80, needle.length)));
+  if (idx < 0) return 1;
+  return content.slice(0, idx).split("\n").length;
 }
 
 export async function editFile(
@@ -291,17 +314,33 @@ export async function editFile(
   await assertNotBinary(absolute, filePath);
   const content = await fs.readFile(absolute, "utf8");
 
-  const { updated, strategy, replacements, diffPreview } = applyMultiStrategyPatch(
-    content,
-    oldText,
-    newText,
-    filePath,
-    options,
-  );
-  await fs.writeFile(absolute, updated, "utf8");
-  const count = replacements && replacements > 1 ? `, replacements: ${replacements}` : "";
-  const preview = diffPreview ? `\nDiff preview (confirm this is the intended region):\n${diffPreview}` : "";
-  return `Edited ${filePath} (strategy: ${strategy}${count})${preview}`;
+  try {
+    const { updated, strategy, replacements, diffPreview } = applyMultiStrategyPatch(
+      content,
+      oldText,
+      newText,
+      filePath,
+      options,
+    );
+    await fs.writeFile(absolute, updated, "utf8");
+    const count = replacements && replacements > 1 ? `, replacements: ${replacements}` : "";
+    const preview = diffPreview ? `\nDiff preview (confirm this is the intended region):\n${diffPreview}` : "";
+    let snippet = "";
+    if (options?.snippet) {
+      const center = findCenterLine(updated, newText);
+      snippet = `\n${formatSnippetLines(updated, center, 20)}`;
+    }
+    return `Edited ${filePath} (strategy: ${strategy}${count})${preview}${snippet}`;
+  } catch (e) {
+    // Phase 2 hygiene (editRebase): stale old_text rebases without a model turn.
+    // The tool already re-read fresh bytes above; when the match is ambiguous
+    // return the current snippet so the next edit can proceed directly.
+    if (options?.rebase && e instanceof Error && /old_text was not found/i.test(e.message)) {
+      const snippet = formatSnippetLines(content, findCenterLine(content, oldText), 10);
+      throw new Error(`${e.message}\n[Current file snippet — retry with an exact copy from below, no re-read needed]\n${snippet}`);
+    }
+    throw e;
+  }
 }
 
 export interface MultiEdit {
@@ -311,7 +350,12 @@ export interface MultiEdit {
 }
 
 /** Apply every edit to an in-memory copy. The file is written once, or not at all. */
-export async function multiEdit(repoRoot: string, filePath: string, edits: MultiEdit[]): Promise<string> {
+export async function multiEdit(
+  repoRoot: string,
+  filePath: string,
+  edits: MultiEdit[],
+  options?: EditOptions,
+): Promise<string> {
   if (edits.length === 0) throw new Error("multi_edit requires at least one edit");
   assertNotSecret(filePath);
   const absolute = resolveInsideRepo(repoRoot, filePath);
@@ -329,15 +373,29 @@ export async function multiEdit(repoRoot: string, filePath: string, edits: Multi
     );
   }
   await assertNotBinary(absolute, filePath);
-  let content = await fs.readFile(absolute, "utf8");
+  const original = await fs.readFile(absolute, "utf8");
+  let content = original;
   const strategies: string[] = [];
-  for (const edit of edits) {
-    const result = applyMultiStrategyPatch(content, edit.oldText, edit.newText, filePath, {
-      replaceAll: edit.replaceAll,
-    });
-    content = result.updated;
-    strategies.push(result.strategy);
+  try {
+    for (const edit of edits) {
+      const result = applyMultiStrategyPatch(content, edit.oldText, edit.newText, filePath, {
+        replaceAll: edit.replaceAll,
+      });
+      content = result.updated;
+      strategies.push(result.strategy);
+    }
+  } catch (e) {
+    if (options?.rebase && e instanceof Error && /old_text was not found/i.test(e.message)) {
+      const snippet = formatSnippetLines(original, 1, 10);
+      throw new Error(`${e.message}\n[Current file snippet — retry with an exact copy from below, no re-read needed]\n${snippet}`);
+    }
+    throw e;
   }
   await fs.writeFile(absolute, content, "utf8");
-  return `Edited ${filePath} (${edits.length} edits, strategies: ${strategies.join(", ")})`;
+  let snippet = "";
+  if (options?.snippet) {
+    const lastNew = edits[edits.length - 1]?.newText ?? "";
+    snippet = `\n${formatSnippetLines(content, findCenterLine(content, lastNew), 20)}`;
+  }
+  return `Edited ${filePath} (${edits.length} edits, strategies: ${strategies.join(", ")})${snippet}`;
 }

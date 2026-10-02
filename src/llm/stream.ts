@@ -23,7 +23,15 @@ export interface ChatStreamChunk {
     };
     finish_reason?: string | null;
   }>;
-  usage?: { prompt_tokens?: number; completion_tokens?: number; cached_tokens?: number };
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    cached_tokens?: number;
+    input_tokens?: number;
+    output_tokens?: number;
+    reasoning_tokens?: number;
+    completion_tokens_details?: { reasoning_tokens?: number };
+  };
 }
 
 interface ToolAcc {
@@ -66,11 +74,16 @@ export function chatChunkToEvents(chunk: ChatStreamChunk, tools: Map<number, Too
     }
   }
   if (chunk.usage) {
+    const u = chunk.usage;
+    const reasoning =
+      u.reasoning_tokens ?? u.completion_tokens_details?.reasoning_tokens ?? null;
     events.push({
       type: "usage",
-      input: chunk.usage.prompt_tokens ?? 0,
-      output: chunk.usage.completion_tokens ?? 0,
-      cachedInput: chunk.usage.cached_tokens,
+      input: u.prompt_tokens ?? u.input_tokens ?? 0,
+      output: u.completion_tokens ?? u.output_tokens ?? 0,
+      cachedInput: u.cached_tokens,
+      reasoningTokens: typeof reasoning === "number" ? reasoning : null,
+      usageEstimated: false,
     });
   }
   if (choice?.finish_reason) {
@@ -101,6 +114,7 @@ export async function collectProviderEvents(events: AsyncIterable<ProviderEvent>
   let thinking = "";
   let finish_reason: string | undefined;
   let usage: ResponsesCreateResult["usage"];
+  let sawUsage = false;
   const output: ResponsesCreateResult["output"] = [];
   const calls = new Map<string, { name: string; arguments: string }>();
 
@@ -125,7 +139,14 @@ export async function collectProviderEvents(events: AsyncIterable<ProviderEvent>
         calls.set(event.id, { name: event.name, arguments: event.arguments });
         break;
       case "usage":
-        usage = { input: event.input, output: event.output, cachedInput: event.cachedInput };
+        sawUsage = true;
+        usage = {
+          input: event.input,
+          output: event.output,
+          cachedInput: event.cachedInput,
+          reasoningTokens: event.reasoningTokens ?? null,
+          usageEstimated: event.usageEstimated ?? false,
+        };
         break;
       case "stop":
         finish_reason = event.finishReason;
@@ -148,6 +169,14 @@ export async function collectProviderEvents(events: AsyncIterable<ProviderEvent>
     throw new Error("Chat stream ended with no output (truncated); retryable");
   }
 
+  if (!sawUsage) {
+    // Provider omitted usage: estimate from text, never store silent 0.
+    const est = Math.max(1, Math.round(text.length / 4));
+    usage = { input: 0, output: est, reasoningTokens: null, usageEstimated: true };
+  } else if (usage && usage.reasoningTokens === undefined) {
+    usage.reasoningTokens = null;
+  }
+
   return {
     output,
     output_text: text,
@@ -158,13 +187,15 @@ export async function collectProviderEvents(events: AsyncIterable<ProviderEvent>
 }
 
 /** Adapter so existing Agent tests keep calling a Responder during the migration. */
-export function providerToResponder(provider: Provider, system = ""): (input: unknown[], options?: { tools?: boolean }) => Promise<ResponsesCreateResult> {
+export function providerToResponder(provider: Provider, system = ""): (input: unknown[], options?: { tools?: boolean; exclude?: string[]; signal?: AbortSignal }) => Promise<ResponsesCreateResult> {
   return async (input, options) =>
     collectProviderEvents(
       provider.stream({
         system,
         messages: input,
         tools: options?.tools ?? true,
+        exclude: options?.exclude,
+        signal: options?.signal,
       }),
     );
 }

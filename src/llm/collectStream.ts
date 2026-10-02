@@ -16,6 +16,7 @@ export async function collectStreamingWithEmit(
   let thinking = "";
   let finishReason: string | undefined;
   let usage: ResponsesCreateResult["usage"];
+  let sawUsage = false;
   const output: ResponsesCreateResult["output"] = [];
   const calls = new Map<string, { name: string; arguments: string }>();
 
@@ -42,8 +43,15 @@ export async function collectStreamingWithEmit(
         calls.set(event.id, { name: event.name, arguments: event.arguments });
         break;
       case "usage":
-        usage = { input: event.input, output: event.output, cachedInput: event.cachedInput };
-        emit({ type: "usage", input: event.input, output: event.output, cachedInput: event.cachedInput });
+        sawUsage = true;
+        usage = {
+          input: event.input,
+          output: event.output,
+          cachedInput: event.cachedInput,
+          reasoningTokens: event.reasoningTokens ?? null,
+          usageEstimated: event.usageEstimated ?? false,
+        };
+        emit({ type: "usage", input: event.input, output: event.output, cachedInput: event.cachedInput, reasoningTokens: event.reasoningTokens ?? null, usageEstimated: event.usageEstimated ?? false });
         break;
       case "stop":
         finishReason = event.finishReason;
@@ -67,6 +75,12 @@ export async function collectStreamingWithEmit(
   }
   if (output.length === 0 && finishReason === undefined) {
     throw new Error("Chat stream ended with no output (truncated); retryable");
+  }
+  if (!sawUsage) {
+    const est = Math.max(1, Math.round(text.length / 4));
+    usage = { input: 0, output: est, reasoningTokens: null, usageEstimated: true };
+  } else if (usage && usage.reasoningTokens === undefined) {
+    usage.reasoningTokens = null;
   }
   return {
     output,

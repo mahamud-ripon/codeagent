@@ -97,6 +97,26 @@ const COMMAND_SEMANTICS: Map<string, CommandSemantic> = new Map([
 ]);
 
 /**
+ * Phase 2 hygiene (emptySuccess): exit 0 + empty stdout from node/python
+ * one-liners is a tool failure, not a durable green. Windows false greens:
+ * multi-line `node -e` / `python -c` returned exit 0 with empty output and
+ * silence was read as success. Label-only here; the caller decides whether
+ * the hygiene flag treats it as failure (default off = historical behavior).
+ */
+export function isEmptyScriptSuccess(command: string, exitCode: number, stdout: string, stderr: string): boolean {
+  if (exitCode !== 0) return false;
+  const base = extractBaseCommand(command);
+  if (base !== "node" && base !== "python" && base !== "python3") return false;
+  const out = (stdout ?? "").trim();
+  const err = (stderr ?? "").trim();
+  if (out.length > 0 || err.length > 0) return false;
+  // Only one-liner eval forms are suspect; a `node script.js` with no output
+  // may legitimately be silent (e.g. a test file that only asserts).
+  if (!/-(e|c)\b/.test(command)) return false;
+  return true;
+}
+
+/**
  * Interprets command exit codes using semantic rules so that tools like grep
  * with 0 matches are recognized as normal operations rather than failures.
  */
@@ -105,7 +125,17 @@ export function interpretCommandResult(
   exitCode: number,
   stdout: string,
   stderr: string,
+  hygieneOn = false,
 ): CommandSemanticResult {
+  if (hygieneOn && isEmptyScriptSuccess(command, exitCode, stdout, stderr)) {
+    return {
+      isError: true,
+      semanticMessage: "Empty inline script success",
+      annotatedOutput:
+        "TOOL FAILURE: `node -e` / `python -c` exited 0 with empty output. " +
+        "Empty stdout is not proof of success — write a temp script file and run it instead.",
+    };
+  }
   const base = extractBaseCommand(command);
   const semantic = COMMAND_SEMANTICS.get(base);
   if (semantic) {

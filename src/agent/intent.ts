@@ -1,4 +1,4 @@
-export type AgentIntent = "conversational" | "inquiry" | "task";
+export type AgentIntent = "conversational" | "inquiry" | "task" | "external";
 
 const CONVERSATIONAL_STANDALONE = [
   /^(hi|hello|hey|yo|howdy|sup|greetings)(\s+there|\s+codeagent|\s+assistant|\s+bot)?[\s.!,?]*$/i,
@@ -27,15 +27,87 @@ const INQUIRY_PATTERNS = [
   /\bhow\s+is\s+\w+\s+implemented\b/i,
 ];
 
+/** Questions about the agent itself — answer from system prompt, no repo reads. */
+const SELF_PATTERNS = [
+  /\bwhat\s+is\s+codeagent\b/i,
+  /\bwho\s+(made|built|created)\s+(you|codeagent)\b/i,
+  /\bhow\s+do\s+(you|codeagent)\s+work\b/i,
+];
+
+/**
+ * Current/external information request — needs web_search capability.
+ * e.g. "which is latest claude model", "today's price", "current docs".
+ */
+const CURRENT_INFO_PATTERNS = [
+  /\b(latest|newest|current|today'?s?|right\s+now|as\s+of|up[\s-]?to[\s-]?date)\b/i,
+  /\b20(2[6-9]|[3-9]\d)\b/,
+  /\b(search\s+(the\s+)?web|search\s+for|look\s*up|google\s+(for|it)|web\s+search)\b/i,
+  /\bwhat('s| is) the latest\b/i,
+  /\bwhich is (the )?(latest|newest|current)\b/i,
+  /\b(newest|latest)\s+(version|release|model|docs|documentation)\b/i,
+  /\b(current\s+)?(price|version|release|changelog|docs|documentation)\b.*\?$/i,
+];
+
+/**
+ * Repo-specific signals — distinguishes "where is App defined HERE"
+ * from general "what is github?". Inquiry requires at least one of these
+ * (or an INQUIRY_PATTERN with repo context); otherwise general knowledge
+ * stays conversational with zero tools.
+ */
+const REPO_SIGNALS = /\b(here|repo|repository|project|codebase|layout|structure|this\s+(repo|repository|project|codebase|code|app|file|folder|directory)|our\s+(repo|project|codebase|code|app)|project\s+structure|codebase|in\s+(this|the)\s+(repo|project|code)|file|folder|directory|function|component|class|module|auth\w*|rout\w+|middleware|import|export|package\.json|TS|API\s+route)\b/i;
+
+const GENERAL_KNOWLEDGE_PATTERNS = [
+  /^(what\s+is|what'?s|what\s+are|who\s+is|define|explain\s+(how\s+)?(a\s+|the\s+)?(general|concept)?)\b/i,
+  /^(explain|describe|tell\s+me\s+about)\s+(recursion|github|git|docker|rest|http|json|python|javascript|typescript|react|node|general|concept)/i,
+];
+
 const ACTION_VERBS = /\b(fix|add|create|implement|modify|edit|update|change|delete|remove|refactor|build|test|lint|typecheck|run|rewrite|replace|install|upgrade|commit)\b/i;
 const CODE_FILE_EXTENSION = /\b[\w-]+\.(ts|tsx|js|jsx|json|html|css|scss|md|py|go|rs|java|c|cpp|h|yml|yaml|toml|sh)\b/i;
 
 /**
  * Classifies a user prompt into:
- * - "conversational": Pure dialogue, greetings, or open-ended help queries (0 tool executions).
- * - "inquiry": Information seeking / codebase questions (read-only exploration).
+ * - "conversational": Pure dialogue, greetings, general knowledge, or
+ *   open-ended help queries (0 tool executions, no repo context).
+ * - "inquiry": Repo-specific information seeking (read-only exploration).
  * - "task": Direct code modification, debugging, or execution.
+ * - "external": Current/external information needing web_search capability.
+ *   No repo context; explicit limitation when web is unavailable.
  */
+export function isCurrentInfoQuery(prompt: string): boolean {
+  const t = prompt.trim();
+  for (const p of CURRENT_INFO_PATTERNS) {
+    if (p.test(t)) return true;
+  }
+  return false;
+}
+
+/** True for exact greetings/thanks that can skip the LLM entirely. */
+export function isExactGreeting(prompt: string): boolean {
+  const t = prompt.trim().toLowerCase().replace(/[!.,?]+$/, "");
+  return /^(hi|hello|hey|yo|howdy|sup|greetings)(\s+there)?$/.test(t)
+    || /^(good\s+(morning|afternoon|evening|day))$/.test(t)
+    || /^(thanks|thank you|thx|cheers)(\s+a\s+lot|\s+very\s+much)?$/.test(t)
+    || /^(bye|goodbye|see ya)$/.test(t);
+}
+
+/** Canned instant reply for exact greetings — no model call, ~0ms. */
+export function fastGreetingResponse(prompt: string): string | null {
+  const t = prompt.trim().toLowerCase().replace(/[!.,?]+$/, "");
+  if (/^(hi|hello|hey|yo|howdy|sup|greetings)(\s+there)?$/.test(t)) {
+    return "Hello! What would you like to work on?";
+  }
+  if (/^(good\s+(morning|afternoon|evening|day))$/.test(t)) {
+    return "Hello! What would you like to work on?";
+  }
+  if (/^(thanks|thank you|thx|cheers)(\s+a\s+lot|\s+very\s+much)?$/.test(t)) {
+    return "You're welcome! Anything else I can help with?";
+  }
+  if (/^(bye|goodbye|see ya)$/.test(t)) {
+    return "Bye!";
+  }
+  return null;
+}
+
 export function classifyIntent(prompt: string): AgentIntent {
   const trimmed = prompt.trim();
   if (!trimmed) return "conversational";
@@ -54,8 +126,16 @@ export function classifyIntent(prompt: string): AgentIntent {
     }
   }
 
+  // Agent-self questions — no repo reads needed
+  for (const pattern of SELF_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return "conversational";
+    }
+  }
+
   // If it mentions specific action verbs or filenames, it's a task even if phrased politely
   // e.g. "can you help me fix App.tsx?" -> task
+  // Note: "search the web" is NOT a code action — handled as external below.
   const hasActionVerb = ACTION_VERBS.test(trimmed);
   const mentionsFile = CODE_FILE_EXTENSION.test(trimmed);
 
@@ -63,16 +143,40 @@ export function classifyIntent(prompt: string): AgentIntent {
     return "task";
   }
 
-  // Check for informational inquiry
+  // Current/external info needs web capability — before inquiry so
+  // "which is latest claude model" doesn't become a repo task.
+  if (isCurrentInfoQuery(trimmed)) {
+    return "external";
+  }
+
+  const hasRepoSignal = REPO_SIGNALS.test(trimmed);
+
+  // Check for informational inquiry — repo-scoped only. A bare
+  // "explain recursion" or "what is github?" without repo signals is
+  // general knowledge -> conversational (zero tools).
   for (const pattern of INQUIRY_PATTERNS) {
     if (pattern.test(trimmed)) {
+      if (hasRepoSignal) return "inquiry";
+      // "explain X" with no repo signal: repo only if X looks like
+      // project internals, else general knowledge.
+      if (/^(explain|describe|summarize|tell\s+me\s+about)\b/i.test(trimmed)) {
+        return hasRepoSignal ? "inquiry" : "conversational";
+      }
       return "inquiry";
     }
   }
 
-  // Default: if it ends with a question mark and is short, treat as inquiry / conversational
+  // General-knowledge questions without repo signals -> conversational
+  for (const pattern of GENERAL_KNOWLEDGE_PATTERNS) {
+    if (pattern.test(trimmed) && !hasRepoSignal) {
+      return "conversational";
+    }
+  }
+
+  // Short questions: repo signal -> inquiry, else conversational.
+  // (Was: always inquiry — caused 40-60s repo loads for "what is github?")
   if (trimmed.endsWith("?") && trimmed.split(/\s+/).length < 10) {
-    return "inquiry";
+    return hasRepoSignal ? "inquiry" : "conversational";
   }
 
   // Otherwise assume it's a task instruction

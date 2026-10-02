@@ -31,4 +31,15 @@ describe("search (ripgrep)", () => {
   it("rejects empty queries", async () => {
     await expect(search(tmp, "   ")).rejects.toThrow(/empty/i);
   });
+
+  it("hides .codeagent and __pycache__ when searchIgnores on", async () => {
+    await writeFile(tmp, ".codeagent/audit.jsonl", "authenticate secret\n");
+    await writeFile(tmp, "__pycache__/cache.py", "authenticate cached\n");
+    const off = await search(tmp, "authenticate", false);
+    expect(off).toContain("auth.ts");
+    const on = await search(tmp, "authenticate", true);
+    expect(on).toContain("auth.ts");
+    expect(on).not.toContain("audit.jsonl");
+    expect(on).not.toContain("__pycache__");
+  });
 });

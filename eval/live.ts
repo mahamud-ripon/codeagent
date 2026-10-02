@@ -13,13 +13,19 @@
  * suite (optional per-task `verify` hidden checks, `timeoutSec`,
  * `maxIterations`); results go to eval/results/live-advanced.json so the
  * base baseline is never clobbered.
+ *
+ * Phase 0-3: advanced-v1 is frozen history; advanced-v2 is the suite under
+ * development (600 s / 30 turns primary, 180 s + 15 turns secondary columns,
+ * per-turn UTF-8 JSONL, v2 abort taxonomy, one infra auto-rerun).
  */
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { query } from "../src/sdk/query.js";
-import { checkExpectMatch, renderLiveSummary, summarizeLive, writeLiveResults, type LiveTaskResult } from "./score.js";
+import { checkExpectMatch, renderLiveSummary, summarizeLive, writeLiveResults, isInfraOutcome, type LiveTaskResult } from "./score.js";
+import { appendTurnRecord, classifyAbort, failureClassFromToolOutput, genMsPerToken } from "./instrument.js";
+import { parseFlagNames, DEFAULT_RUNTIME_FLAGS, type RuntimeFlags } from "../src/agent/runtimeFlags.js";
 import { loadGlobalEnv } from "../src/cli/config.js";
 
 loadGlobalEnv();
@@ -48,7 +54,7 @@ interface Task {
   /** Hidden post-run check (written to the tmp repo only after the agent
    * finishes, so the agent can never see or game it). */
   verify?: { file: string; content: string; run: string; expectOut?: string };
-  /** Per-task budget overrides (defaults: 180 s, 15 iterations). */
+  /** Per-task budget overrides (defaults: 180 s, 15 iterations; v2: 600 s, 30). */
   timeoutSec?: number;
   maxIterations?: number;
 }
@@ -58,8 +64,24 @@ const tasks = JSON.parse(fs.readFileSync(path.join(root, tasksFile), "utf8")) as
 // Advanced suites write beside the base baseline instead of clobbering it:
 // tasks.json -> live.json, tasks-advanced.json -> live-advanced.json.
 const stem = tasksFile.replace(/\.json$/i, "");
-const outBase = stem === "tasks" ? "live" : `live-${stem.replace(/^tasks-?/, "") || "custom"}`;
+// Phase 4 ablation rows: EVAL_FLAGS selects flags (comma names or A-E),
+// EVAL_LABEL segregates outputs so a flag row can never clobber the baseline.
+// A non-default flag set without a label is a hard error.
+const rowFlags: RuntimeFlags = parseFlagNames(process.env.EVAL_FLAGS ?? "");
+const flagsOn = (Object.keys(DEFAULT_RUNTIME_FLAGS) as (keyof RuntimeFlags)[]).some((k) => rowFlags[k]);
+const label = (process.env.EVAL_LABEL ?? "").replace(/[^a-z0-9-]+/gi, "-").replace(/^-+|-+$/g, "").slice(0, 40);
+if (flagsOn && !label) {
+  console.error("eval:live: EVAL_FLAGS selects flags but EVAL_LABEL is empty — refusing to run (would clobber baseline files).");
+  process.exit(2);
+}
+const outBase = (stem === "tasks" ? "live" : `live-${stem.replace(/^tasks-?/, "") || "custom"}`) + (label ? `-${label}` : "");
 const outFile = `${outBase}.json`;
+const suiteForJsonl = (stem.replace(/^tasks-?/, "") || "custom") + (label ? `-${label}` : "");
+if (flagsOn || label) {
+  console.log(`eval live row: flags=${JSON.stringify(rowFlags)} label=${label || "(none)"} -> ${outFile} + results/${suiteForJsonl}/`);
+}
+const isV2 = /advanced-v2/.test(tasksFile);
+const seed = Math.max(1, Number(process.env.EVAL_SEED ?? "1") || 1);
 const only = (process.env.EVAL_TASKS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
 const limit = Number(process.env.EVAL_LIMIT ?? "0") || tasks.length;
 const chunk = Number(process.env.EVAL_CHUNK ?? "0");
@@ -131,8 +153,19 @@ function collectWorktreeText(dir: string): string {
   return parts.join("\n");
 }
 
-const results: LiveTaskResult[] = [];
-for (const task of selected) {
+function effectiveBudget(task: Task): { timeoutSec: number; maxIterations: number } {
+  if (isV2) {
+    // Primary v2 budget is 600 s / 30 turns. Per-task overrides never lower it.
+    return {
+      timeoutSec: Math.max(600, task.timeoutSec ?? 600),
+      maxIterations: Math.max(30, task.maxIterations ?? 30),
+    };
+  }
+  return { timeoutSec: task.timeoutSec ?? 180, maxIterations: task.maxIterations ?? 15 };
+}
+
+async function runOneTask(task: Task, attempt: number): Promise<LiveTaskResult> {
+  const { timeoutSec, maxIterations } = effectiveBudget(task);
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), `codeagent-eval-${task.id}-`));
   for (const [rel, content] of Object.entries(task.files)) {
     const full = path.join(tmp, rel);
@@ -140,46 +173,135 @@ for (const task of selected) {
     fs.writeFileSync(full, content);
   }
   const started = Date.now();
+  const deadlineMs = Math.max(30, timeoutSec) * 1000;
   let ttftMs: number | undefined;
+  let queueMs: number | undefined;
   let turns = 0;
   let inputTokens = 0;
   let outputTokens = 0;
+  let reasoningTokens: number | null = null;
+  let usageEstimated = false;
   let costUsd = 0;
+  let generationMsTotal = 0;
+  let providerRetries = 0;
   // Per-turn usage is last-wins: some proxies emit duplicate identical
   // usage chunks per turn, which naive += would double-count (observed
   // live: two identical {input,output} events closing one turn).
   let turnInput = 0;
   let turnOutput = 0;
+  let turnReasoning: number | null = null;
+  let turnEstimated = false;
+  let turnRetries = 0;
   let turnCost = 0;
-  const flushTurn = (): void => {
+  let turnStart = started;
+  let turnFirstTokenAt: number | undefined;
+  let turnToolMs = 0;
+  let turnFailureClass: string | undefined;
+  let toolStartAt: number | undefined;
+  let turnsToGreen: number | undefined;
+  let firstVerificationResult: string | undefined;
+  const flushTurn = (turnNo: number): void => {
+    if (turnNo <= 0) return;
+    const now = Date.now();
+    const turnMs = now - turnStart;
+    const genMs = turnFirstTokenAt !== undefined ? now - turnFirstTokenAt : undefined;
+    const genRatio = genMs !== undefined ? genMsPerToken(genMs, Math.max(1, turnOutput)) : undefined;
+    if (genMs !== undefined) generationMsTotal += genMs;
     inputTokens += turnInput;
     outputTokens += turnOutput;
+    if (turnReasoning != null) reasoningTokens = (reasoningTokens ?? 0) + turnReasoning;
+    if (turnEstimated) usageEstimated = true;
+    providerRetries += turnRetries;
     costUsd += turnCost;
+    try {
+      appendTurnRecord(path.join(root, ".."), suiteForJsonl, task.id, seed, {
+        taskId: task.id,
+        seed,
+        turn: turnNo,
+        queueMs,
+        ttftMs: turnFirstTokenAt !== undefined ? turnFirstTokenAt - turnStart : undefined,
+        reasoningTokens: turnReasoning,
+        outputTokens: turnOutput,
+        inputTokens: turnInput,
+        usageEstimated: turnEstimated,
+        generationMs: genMs,
+        genMsPerToken: genRatio,
+        toolMs: turnToolMs,
+        providerRetries: turnRetries,
+        turnMs,
+        failureClass: turnFailureClass,
+      });
+    } catch {
+      // JSONL is best-effort; scoring continues without it
+    }
     turnInput = 0;
     turnOutput = 0;
+    turnReasoning = null;
+    turnEstimated = false;
+    turnRetries = 0;
     turnCost = 0;
+    turnToolMs = 0;
+    turnFailureClass = undefined;
+    turnFirstTokenAt = undefined;
+    toolStartAt = undefined;
   };
   let finalMessage = "";
   let ok = false;
   let verifyDetail = "";
+  let verifyOk = true;
+  let threw = false;
   try {
-    const signal = AbortSignal.timeout(Math.max(30, task.timeoutSec ?? 180) * 1000);
+    const signal = AbortSignal.timeout(deadlineMs);
     for await (const event of query(task.prompt, {
       repoRoot: tmp,
       autoApprove: true,
-      maxIterations: task.maxIterations ?? 15,
+      maxIterations,
       signal,
+      flags: rowFlags,
     })) {
       if (event.type === "turn_start") {
-        flushTurn();
+        if (turns > 0) flushTurn(turns);
         turns += 1;
+        turnStart = Date.now();
       } else if (event.type === "usage") {
         turnInput = event.input;
         turnOutput = event.output;
+        turnReasoning = (event as { reasoningTokens?: number | null }).reasoningTokens ?? null;
+        turnEstimated = (event as { usageEstimated?: boolean }).usageEstimated ?? false;
+        turnRetries = (event as { providerRetries?: number }).providerRetries ?? turnRetries;
         turnCost = event.costUsd ?? 0;
+      } else if (event.type === "tool_start") {
+        toolStartAt = Date.now();
+        if (turnFirstTokenAt === undefined) {
+          turnFirstTokenAt = Date.now();
+          if (ttftMs === undefined) ttftMs = turnFirstTokenAt - started;
+          if (queueMs === undefined) queueMs = turnFirstTokenAt - turnStart;
+        }
+      } else if (event.type === "tool_end") {
+        const ms = (event as { ms?: number }).ms ?? (toolStartAt !== undefined ? Date.now() - toolStartAt : 0);
+        turnToolMs += ms;
+        toolStartAt = undefined;
+        const out = (event as { output?: string }).output ?? "";
+        turnFailureClass = failureClassFromToolOutput(out);
+        if (turnsToGreen === undefined && /exit code:\s*0/i.test(out) && out.trim().length > 0) {
+          // First green targeted check (label only; empty stdout is not green).
+          const nonEmpty = out.replace(/exit code:\s*0/i, "").trim().length > 0;
+          if (nonEmpty) {
+            turnsToGreen = turns;
+            if (firstVerificationResult === undefined) firstVerificationResult = "green";
+          }
+        } else if (firstVerificationResult === undefined && /exit code:\s*[1-9]/i.test(out)) {
+          firstVerificationResult = "red";
+        }
       } else if (event.type === "done") {
         const result = event.result as { finalMessage?: unknown } | undefined;
         if (typeof result?.finalMessage === "string") finalMessage = result.finalMessage;
+      } else if (event.type === "text_delta" || event.type === "thinking_delta") {
+        if (turnFirstTokenAt === undefined) {
+          turnFirstTokenAt = Date.now();
+          if (ttftMs === undefined) ttftMs = turnFirstTokenAt - started;
+          if (queueMs === undefined) queueMs = turnFirstTokenAt - turnStart;
+        }
       }
       if (ttftMs === undefined && (event.type === "text_delta" || event.type === "tool_start" || event.type === "thinking_delta")) {
         ttftMs = Date.now() - started;
@@ -188,7 +310,6 @@ for (const task of selected) {
     // Hidden behavioral check: written into the tmp repo only after the
     // agent finishes (the agent can never see or game it), executed, then
     // deleted before scoring so it never leaks into expect matching.
-    let verifyOk = true;
     if (task.verify) {
       const vfile = path.join(tmp, task.verify.file);
       try {
@@ -197,9 +318,13 @@ for (const task of selected) {
         if (out.exitCode !== 0) {
           verifyOk = false;
           verifyDetail = `verify "${task.verify.run}" exited ${out.exitCode}: ${(out.stdout + out.stderr).slice(-400)}`;
+          if (firstVerificationResult === undefined) firstVerificationResult = "red";
         } else if (task.verify.expectOut && !out.stdout.includes(task.verify.expectOut)) {
           verifyOk = false;
           verifyDetail = `verify output missing ${JSON.stringify(task.verify.expectOut)}`;
+          if (firstVerificationResult === undefined) firstVerificationResult = "red";
+        } else if (firstVerificationResult === undefined) {
+          firstVerificationResult = "green";
         }
       } catch (e) {
         verifyOk = false;
@@ -214,19 +339,45 @@ for (const task of selected) {
     }
     const haystack = `${finalMessage}\n${collectWorktreeText(tmp)}`;
     ok = checkExpectMatch(haystack, task.expect) && verifyOk;
-    flushTurn();
+    flushTurn(turns);
   } catch (e) {
     finalMessage = e instanceof Error ? e.message : String(e);
     ok = false;
+    threw = true;
+    try {
+      flushTurn(turns);
+    } catch {
+      // ignore
+    }
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
-  const seconds = (Date.now() - started) / 1000;
+  const elapsedMs = Date.now() - started;
+  const seconds = elapsedMs / 1000;
 
-  let outcome: import("./score.js").TaskOutcome = "TASK_FAIL";
+  let outcome: LiveTaskResult["outcome"];
   let failureReason: string | undefined;
   if (ok) {
-    outcome = "TASK_PASS";
+    outcome = isV2 ? "PASS" : "TASK_PASS";
+  } else if (isV2) {
+    const cls = classifyAbort({
+      message: finalMessage + "\n" + verifyDetail,
+      verifyDetail,
+      fromException: threw,
+      deadlineMs,
+      elapsedMs,
+      timedOut: elapsedMs >= deadlineMs - 5000,
+    });
+    outcome = cls;
+    if (cls === "TIMEOUT") failureReason = `Task deadline ${timeoutSec}s reached: ${finalMessage.slice(0, 200)}`;
+    else if (cls === "RATE_LIMIT") failureReason = "Model rate limit exceeded";
+    else if (cls === "PROVIDER_FAILURE") failureReason = "Upstream provider service unavailable";
+    else if (cls === "TOOL_FAILURE") failureReason = `Tool/environment failure: ${(verifyDetail || finalMessage).slice(0, 300)}`;
+    else if (cls === "EVALUATOR_FAILURE") failureReason = verifyDetail || "Verifier crashed";
+    else if (verifyDetail) failureReason = verifyDetail;
+    else failureReason = `Expected "${task.expect}" not found in output or worktree`;
+    // SPEC_AMBIGUITY should be empty on v2; flag it when prompt/verifier disagree.
+    void firstVerificationResult;
   } else {
     if (/timeout|aborted due to timeout/i.test(finalMessage)) {
       outcome = "MODEL_TIMEOUT";
@@ -246,26 +397,67 @@ for (const task of selected) {
     }
   }
 
-  results.push({ taskId: task.id, ok, outcome, failureReason, turns, inputTokens, outputTokens, costUsd, seconds, ttftMs });
-  console.log(`eval live: ${task.id} ${outcome} (${turns} turns, ${seconds.toFixed(1)}s)`);
+  const avgGen = turns > 0 && outputTokens > 0 ? generationMsTotal / Math.max(1, outputTokens) : undefined;
+  const result: LiveTaskResult = {
+    taskId: task.id,
+    ok,
+    outcome,
+    failureReason: attempt > 0 && failureReason ? `[attempt ${attempt + 1}] ${failureReason}` : failureReason,
+    turns,
+    turnsToGreen: ok ? turnsToGreen : undefined,
+    inputTokens,
+    outputTokens,
+    reasoningTokens,
+    usageEstimated,
+    costUsd,
+    seconds,
+    ttftMs,
+    queueMs,
+    generationMs: generationMsTotal || undefined,
+    genMsPerToken: avgGen,
+    providerRetries,
+    latencyConstrained: isV2 ? seconds * 1000 >= 180_000 && !ok : undefined,
+    turnConstrained: isV2 ? turns >= 15 && !ok : undefined,
+  };
+  return result;
+}
+
+const results: LiveTaskResult[] = [];
+for (const task of selected) {
+  let first = await runOneTask(task, 0);
+  // Infra auto-rerun once inside this phase; the model table uses the rerun
+  // when the first attempt is TIMEOUT/RATE_LIMIT/PROVIDER_FAILURE.
+  if (isInfraOutcome(first.outcome)) {
+    console.log(`eval live: ${task.id} ${first.outcome} (infra) — auto-rerun once`);
+    const second = await runOneTask(task, 1);
+    console.log(`eval live: ${task.id} retry ${second.outcome} (${second.turns} turns, ${second.seconds.toFixed(1)}s)`);
+    results.push(second);
+  } else {
+    results.push(first);
+    console.log(`eval live: ${task.id} ${first.outcome} (${first.turns} turns, ${first.seconds.toFixed(1)}s)`);
+  }
 
   if (chunk > 0) {
     const chunkSummary = summarizeLive(results);
+    chunkSummary.flags = rowFlags;
     const chunkFile = path.join(root, "results", `${outBase}-fast${chunk}.json`);
     fs.writeFileSync(chunkFile, JSON.stringify({ ...chunkSummary, at: new Date().toISOString() }, null, 2));
   } else {
     if (results.length % chunkSize === 0) {
       const chunkIdx = Math.floor(results.length / chunkSize);
       const chunkSummary = summarizeLive(results.slice(results.length - chunkSize));
+      chunkSummary.flags = rowFlags;
       const chunkFile = path.join(root, "results", `${outBase}-fast${chunkIdx}.json`);
       fs.writeFileSync(chunkFile, JSON.stringify({ ...chunkSummary, at: new Date().toISOString() }, null, 2));
     }
     const runningSummary = summarizeLive(results);
+    runningSummary.flags = rowFlags;
     await writeLiveResults(path.join(root, ".."), runningSummary, outFile);
   }
 }
 
 const summary = summarizeLive(results);
+summary.flags = rowFlags;
 if (chunk > 0) {
   const chunkFile = path.join(root, "results", `${outBase}-fast${chunk}.json`);
   console.log(renderLiveSummary(summary));

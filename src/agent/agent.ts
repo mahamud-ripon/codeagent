@@ -8,7 +8,7 @@ import {
   type AgentRunResult,
   type AgentState,
 } from "./types.js";
-import { classifyIntent } from "./intent.js";
+import { classifyIntent, fastGreetingResponse } from "./intent.js";
 import { classifyIntentWithModel } from "./intentModel.js";
 import { buildSystemPrompt, promptFamilyForModel } from "./promptSections.js";
 import { isSmallModelMode, filterToolsForSmallModel, repairToolArgumentsJson, SMALL_MODEL_SYSTEM_SUFFIX } from "../llm/smallModel.js";
@@ -35,6 +35,8 @@ import { detectNoProgress } from "./progress.js";
 import { logAudit } from "./audit.js";
 import { isAuthError as isAuthErrorFromRetry, isRateLimitError as isRateLimitErrorFromRetry } from "../llm/retry.js";
 import { loadModelSettings } from "./settings.js";
+import type { RuntimeFlags } from "./runtimeFlags.js";
+import { DEFAULT_RUNTIME_FLAGS } from "./runtimeFlags.js";
 
 export interface AgentOptions extends AgentConfig {
   /** Injected for tests — defaults to the provider selected from env. */
@@ -97,6 +99,10 @@ export interface AgentOptions extends AgentConfig {
   planResponder?: Responder;
   /** Force small-model mode regardless of model id (ML-4 setting). */
   smallModel?: boolean;
+  /** Thin-runtime behavioral flags (plan.md Phase 2+4). Default off = baseline. */
+  flags?: import("./runtimeFlags.js").RuntimeFlags;
+  /** Fast-model responder for Phase 4E fastExplore (read-only turns). */
+  fastResponder?: Responder;
 }
 
 export class StuckError extends Error {
@@ -150,9 +156,13 @@ export class Agent {
   private fileStateCache: FileStateCache;
   private providerOverrides: ProviderOverrides;
   private usage = { input: 0, output: 0, costUsd: 0, cachedInput: 0 };
+  /** Retries inside withProviderRetry for the most recent model call (per-turn). */
+  private lastCallProviderRetries = 0;
   private modelRoles?: ModelRoles;
   private planResponder?: Responder;
   private smallModelForced?: boolean;
+  private flags: RuntimeFlags;
+  private fastResponder?: Responder;
 
   constructor(private options: AgentOptions) {
     this.verbose = options.verbose ?? true;
@@ -188,6 +198,8 @@ export class Agent {
     this.modelRoles = options.modelRoles;
     this.planResponder = options.planResponder;
     this.smallModelForced = options.smallModel;
+    this.flags = options.flags ?? { ...DEFAULT_RUNTIME_FLAGS };
+    this.fastResponder = options.fastResponder;
   }
 
   private emit(event: AgentEvent): void {
@@ -201,7 +213,10 @@ export class Agent {
    * ML-5: while plan mode is active and a plan-model responder is
    * configured, route the main-loop call through it (resolveModelFor).
    */
-  private async callModel(input: unknown[], opts?: { tools?: boolean; signal?: AbortSignal }): Promise<ResponsesCreateResult> {
+  private async callModel(
+    input: unknown[],
+    opts?: { tools?: boolean; signal?: AbortSignal; phase?: string; exclude?: string[] },
+  ): Promise<ResponsesCreateResult> {
     // ML-5 plan-role routing: exploration while planning prefers the plan model.
     const usePlanResponder = this.planModeManager?.isActive() && this.planResponder;
     if (usePlanResponder) {
@@ -210,6 +225,16 @@ export class Agent {
         return await this.planResponder!(input, opts);
       } catch {
         // fall through to the default path
+      }
+    }
+    // Phase 4E fastExplore: read-only explore turns may use settings.fast when
+    // it differs from main. Edits stay on main. Gated on Phase 1 latency data
+    // (high genMsPerToken with few output tokens, not queue/retries).
+    if (this.flags.fastExplore && opts?.phase === "explore" && this.fastResponder) {
+      try {
+        return await this.fastResponder(input, opts);
+      } catch {
+        // fall through to main on fast-model failure
       }
     }
     if (!this.providerInstance) {
@@ -223,23 +248,47 @@ export class Agent {
     // empty stream). Provider adapters retry only the initial fetch POST
     // (maxAttempts 2); this outer layer retries the collapsed stream.
     // Total bounded at 2×3=6 attempts, Retry-After honored up to 5m.
-    return withProviderRetry(
-      () =>
-        collectStreamingWithEmit(
-          this.providerInstance!,
-          { system: this.systemPrompt ?? "", messages: input, tools: opts?.tools ?? true, signal: opts?.signal },
-          (e) => this.emit(e),
-        ),
-      {
-        signal: opts?.signal,
-        maxAttempts: 3,
-        baseMs: 1500,
-        maxMs: 15_000,
-        onRetry: (attempt, waitMs, msg) => {
-          this.log(`Streaming provider retry ${attempt} after error (${msg}), waiting ${waitMs}ms...`);
+    this.lastCallProviderRetries = 0;
+    try {
+      return await withProviderRetry(
+        () =>
+          collectStreamingWithEmit(
+            this.providerInstance!,
+            { system: this.systemPrompt ?? "", messages: input, tools: opts?.tools ?? true, signal: opts?.signal, exclude: opts?.exclude },
+            (e) => this.emit(e),
+          ),
+        {
+          signal: opts?.signal,
+          maxAttempts: 3,
+          baseMs: 1500,
+          maxMs: 15_000,
+          onRetry: (attempt, waitMs, msg) => {
+            this.lastCallProviderRetries += 1;
+            this.log(`Streaming provider retry ${attempt} after error (${msg}), waiting ${waitMs}ms...`);
+          },
         },
-      },
-    );
+      );
+    } catch (e) {
+      // A failed model call still consumed retries (and possibly queue/time).
+      // Emit them so per-turn JSONL does not silently drop them; token counts
+      // stay 0 because no usage chunk was received.
+      if (this.lastCallProviderRetries > 0) {
+        try {
+          this.emit({
+            type: "usage",
+            input: 0,
+            output: 0,
+            reasoningTokens: null,
+            usageEstimated: true,
+            providerRetries: this.lastCallProviderRetries,
+          });
+        } catch {
+          // timing/emit must never break the error path
+        }
+        this.lastCallProviderRetries = 0;
+      }
+      throw e;
+    }
   }
 
   getTodoManager(): TodoManager {
@@ -289,6 +338,57 @@ export class Agent {
     }
 
     try {
+      // Fast path: exact greetings/thanks/bye skip the model entirely (~0ms,
+      // fixes 5s+ latency on "hello" reported in manual tests).
+      const fast = fastGreetingResponse(userRequest);
+      if (fast !== null) {
+        const input: unknown[] = runOpts?.history && runOpts.history.length > 0
+          ? [...runOpts.history]
+          : [];
+        input.push({ role: "user", content: userRequest });
+        input.push({ role: "assistant", content: fast });
+        this.reporter?.stop();
+        return {
+          finalMessage: fast,
+          iterations: 0,
+          modifiedFiles: [],
+          testResults: [],
+          history: input,
+          intent: "conversational",
+        };
+      }
+
+      // External/current-info path: needs web_search capability.
+      // No repo map, no rules, no git review. Explicit limitation when
+      // web is unavailable instead of answering from stale knowledge.
+      if (intent === "external") {
+        const webAvailable = Boolean(process.env.TAVILY_API_KEY?.trim() || process.env.WEB_SEARCH_ENDPOINT?.trim());
+        if (!webAvailable) {
+          const input: unknown[] = runOpts?.history && runOpts.history.length > 0
+            ? [...runOpts.history]
+            : [];
+          input.push({ role: "user", content: userRequest });
+          const msg =
+            `Web access is unavailable in this environment (no \`TAVILY_API_KEY\` or \`WEB_SEARCH_ENDPOINT\` configured), ` +
+            `so I cannot verify current/external information such as the latest model releases, ` +
+            `prices, or live docs.\n\n` +
+            `I can help with your repository, explain general concepts from background knowledge ` +
+            `(clearly labeled as unverified for current facts), or retry once web search is configured.`;
+          input.push({ role: "assistant", content: msg });
+          this.reporter?.stop();
+          return {
+            finalMessage: msg,
+            iterations: 0,
+            modifiedFiles: [],
+            testResults: [],
+            history: input,
+            intent,
+          };
+        }
+        // Web available: answer with web tools only, no repo context.
+        // Fall through to the main loop but flag no-repo-context below.
+      }
+
       // Conversational bypass: If user prompt is a greeting or general help question,
       // respond directly without running any tools or shell commands.
       if (intent === "conversational") {
@@ -350,17 +450,19 @@ export class Agent {
       ? [...runOpts.history]
       : [];
 
-    // Ensure repository context is injected on the first non-conversational turn even after greetings
+    // Ensure repository context is injected on the first non-conversational turn even after greetings.
+    // External/current-info turns skip repo context entirely (no map, no rules).
     const hasRepoContext = input.some((item) => {
       if (typeof item !== "object" || item === null) return false;
       const content = (item as { content?: unknown }).content;
       return typeof content === "string" && content.includes("<repository>");
     });
 
-    const rules = discoverRules(repoRoot);
-    const memory = loadProjectMemory(repoRoot);
+    const skipRepoContext = intent === "external";
+    const rules = skipRepoContext ? [] : discoverRules(repoRoot);
+    const memory = skipRepoContext ? [] : loadProjectMemory(repoRoot);
 
-    if (!hasRepoContext) {
+    if (!hasRepoContext && !skipRepoContext) {
       // AG-16: ranked map focuses the one-shot context on the task query.
       const repoContext = await buildInitialContext(repoRoot, rules, memory, userRequest);
       input.push({
@@ -394,6 +496,36 @@ export class Agent {
     let noActionNudges = 0;
     let stopHookRetries = 0;
     let lastModelOutputText = "";
+    // Thin-runtime (Phase 4) per-run state. All default-off; empty contract
+    // means apiLock is off for this run (never invented by the runtime).
+    const runStartMs = Date.now();
+    let runContract: import("./contract.js").RunContract | null = null;
+    const readContents = new Map<string, string>();
+    let lastVerificationFailed = false;
+    let lastBuildGreen = false;
+    let verificationGreen = false;
+    let greenNudgeSent = false;
+    const tempTestFiles = new Set<string>();
+    let isGitRepo: boolean | undefined;
+    let sourceFileCount: number | undefined;
+    // Capability-aware routing: always know git + web availability so the
+    // model is never offered tools that cannot work (fixes web_search +
+    // git_status hallucinations outside repos). Cheap cached checks.
+    try {
+      const { isGitRepo: checkGit } = await import("../tools/git.js");
+      isGitRepo = await checkGit(repoRoot);
+    } catch {
+      isGitRepo = undefined;
+    }
+    if (this.flags.economy) {
+      try {
+        const { listFiles } = await import("../tools/filesystem.js");
+        const listing = await listFiles(repoRoot, ".", this.flags.hygiene);
+        sourceFileCount = listing ? listing.split("\n").filter((l) => l.trim() && !l.startsWith("[")).length : undefined;
+      } catch {
+        sourceFileCount = undefined;
+      }
+    }
     const MAX_STOP_HOOK_RETRIES = 2;
     const sleep = this.options.sleep ?? ((ms: number, sig?: AbortSignal) => {
       const signalToWatch = sig ?? signal;
@@ -470,12 +602,40 @@ export class Agent {
         }
         this.emit({ type: "turn_start", turn: state.iteration });
         const thinkingStart = Date.now();
-        result = await this.callModel(requestInput, { signal });
+        // Capability-aware tool exposure: hide git tools outside repos and
+        // web_search without an endpoint so the model never hallucinates them.
+        let toolExcludes: string[] = [];
+        try {
+          const { toolExcludesForRuntime } = await import("../llm/tools.js");
+          toolExcludes = toolExcludesForRuntime({
+            hygieneOn: this.flags.hygiene,
+            economyOn: this.flags.economy,
+            isGitRepo,
+            sourceFileCount,
+          });
+        } catch {
+          toolExcludes = [];
+        }
+        result = await this.callModel(requestInput, { signal, phase: state.phase, exclude: toolExcludes });
         thinkingDurationMs = Date.now() - thinkingStart;
         consecutiveApiErrors = 0;
         rateLimitRetries = 0;
         if (result?.output_text?.trim()) {
           lastModelOutputText = result.output_text.trim();
+        }
+        // Phase 4B: contract proposal rides on the first plan/read turn, never
+        // its own turn. Confirm preserve against files already read.
+        if (this.flags.apiLock && !runContract && state.iteration <= 2 && result?.output_text) {
+          try {
+            const { parseContractProposal, confirmContract } = await import("./contract.js");
+            const proposal = parseContractProposal(result.output_text);
+            if (proposal) {
+              const { confirmed } = confirmContract(proposal, readContents);
+              runContract = confirmed;
+            }
+          } catch {
+            // contract is best-effort; empty means lock off
+          }
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -583,7 +743,11 @@ export class Agent {
           output: result.usage.output,
           cachedInput: result.usage.cachedInput,
           costUsd: cost,
+          reasoningTokens: result.usage.reasoningTokens ?? null,
+          usageEstimated: result.usage.usageEstimated ?? false,
+          providerRetries: this.lastCallProviderRetries,
         });
+        this.lastCallProviderRetries = 0;
         const used = this.usage.input + this.usage.output;
         if (this.options.maxTotalTokens && used > this.options.maxTotalTokens) {
           return {
@@ -765,6 +929,9 @@ export class Agent {
           modifiedFiles: state.modifiedFiles,
           todoManager: this.todoManager,
           planModeManager: this.planModeManager,
+          stopOnGreen: this.flags.stopOnGreen,
+          verificationGreen,
+          tempTestFiles: [...tempTestFiles],
         });
 
         // EX-3: user Stop hooks fire best-effort before concluding.
@@ -873,6 +1040,92 @@ export class Agent {
         state.recentSignatures.push(sig);
         if (state.recentSignatures.length > RECENT_WINDOW) state.recentSignatures.shift();
         const repeats = state.recentSignatures.filter((s) => s === sig).length;
+        // Phase 4A progressRedirect: same command twice with no write since
+        // (or same failure text) -> block + evidence, ask for new hypothesis.
+        // Fires at 2 (earlier than warn-at-3); abort-at-6 stays the backstop.
+        // Inquiry exempt so Q&A can reread (conversational already returned).
+        if (this.flags.progressRedirect && name === "run_command" && repeats >= 2 && intent !== "inquiry") {
+          try {
+            const { shouldRedirectProgress } = await import("./progress.js");
+            const lastErr = state.errors.slice(-1)[0] ?? "";
+            const verdict = shouldRedirectProgress({
+              name,
+              args,
+              toolCalls: state.toolCalls,
+              testResults: state.testResults,
+              errors: state.errors,
+              intent,
+              lastOutput: lastErr,
+            });
+            if (verdict.redirect) {
+              const remainingTurns = maxIterations - state.iteration;
+              const remainingMs = Math.max(0, 600_000 - (Date.now() - runStartMs));
+              const evidence =
+                `${verdict.reason}\n[EVIDENCE last command: ${String(args.command ?? "").slice(0, 300)} | ` +
+                `class: ${lastErr.slice(0, 160) || "(none)"} | remaining: ${remainingTurns} turns / ${Math.round(remainingMs / 1000)}s` +
+                `${runContract?.preserve?.length ? ` | contract preserve: ${runContract.preserve.slice(0, 5).join(", ")}` : ""}]`;
+              return { callId, name, args, output: `TOOL ERROR (${name}): ${evidence}`, success: false, summary: "progress redirect" };
+            }
+          } catch {
+            // redirect is best-effort; fall through to warn/abort guards
+          }
+        }
+        // Phase 4B apiLock: reject whole-file writes that drop preserved
+        // package/exported signatures, and late overwrites after green build.
+        if (this.flags.apiLock && runContract && runContract.preserve.length > 0 && (name === "write_file")) {
+          try {
+            const { shouldRejectWholeFileWrite, shouldRejectLateOverwrite } = await import("./contract.js");
+            const p = typeof args.path === "string" ? args.path : "";
+            const newContent = typeof args.content === "string" ? args.content : "";
+            if (p && newContent) {
+              const { default: fs } = await import("node:fs/promises");
+              const { default: path } = await import("node:path");
+              let oldContent: string | null = null;
+              try {
+                oldContent = await fs.readFile(path.join(repoRoot, p), "utf8");
+              } catch {
+                oldContent = null;
+              }
+              const rej = shouldRejectWholeFileWrite({
+                filePath: p,
+                oldContent,
+                newContent,
+                preserve: runContract.preserve,
+                lastVerificationFailed,
+                userText: userRequest,
+              });
+              if (rej.reject) {
+                return { callId, name, args, output: `TOOL ERROR (${name}): ${rej.reason}`, success: false, summary: "api lock" };
+              }
+              const late = shouldRejectLateOverwrite({
+                remainingTurns: maxIterations - state.iteration,
+                remainingMs: Math.max(0, 600_000 - (Date.now() - runStartMs)),
+                lastBuildGreen,
+                isWholeFileWrite: true,
+              });
+              if (late.reject) {
+                return { callId, name, args, output: `TOOL ERROR (${name}): ${late.reason}`, success: false, summary: "api lock late" };
+              }
+            }
+          } catch (e) {
+            if (e instanceof Error && /apiLock/.test(e.message)) throw e;
+            // best-effort; fall through
+          }
+        }
+        // Phase 4C contractTests: never invent network installs; guide missing tests.
+        if (this.flags.contractTests && name === "run_command") {
+          const cmd = String(args.command ?? "");
+          if (/go\s+install\s|npm\s+(install|i)\s+-g|pip\s+install\s+(ruff|pyright|mypy)/i.test(cmd) && !/install/i.test(userRequest)) {
+            return {
+              callId,
+              name,
+              args,
+              output: `TOOL ERROR (run_command): contractTests: network installs (${cmd.slice(0, 120)}) are rejected unless the user asked. Use the local toolchain.`,
+              success: false,
+              summary: "contractTests no-install",
+            };
+          }
+        }
         if (repeats >= REPEAT_ABORT_THRESHOLD) {
           const tried = state.toolCalls
             .slice(-6)
@@ -974,9 +1227,25 @@ export class Agent {
             hooks: this.options.hooks,
             commandRunner: this.options.commandRunner,
             sandboxMode: this.options.sandboxMode,
+            flags: this.flags,
+            isGitRepo,
+            sourceFileCount,
             // AG-14: stream spawn chunks as tool_output_delta events.
             onToolOutputDelta: (chunk: string) => this.emit({ type: "tool_output_delta", id: callId, chunk }),
           });
+          // Phase 4C contractTests: missing-test guidance (same package, no invented assertions).
+          if (this.flags.contractTests && /\[no test files\]|no test files/i.test(toolOutput)) {
+            toolOutput +=
+              `\n[contractTests: go test reports no test files. Write a temp test in the SAME package ` +
+              `(e.g. _contract_tmp_test.go with the file's package clause), run it, and delete it before stop. ` +
+              `Do not invent assertions — check the preserved API only.]`;
+            try {
+              const m = /_contract_tmp_test\.go|_eval_tmp_test\.go/.test(toolOutput) ? null : null;
+              void m;
+            } catch {
+              // ignore
+            }
+          }
           // EX-3 PostToolUse hooks (best effort, never block).
           if (this.options.hooks) {
             try {
@@ -1038,6 +1307,16 @@ export class Agent {
         if (pathArg && ["read", "read_file", "view_file", "write_file", "edit_file", "view_symbol_outline"].includes(name)) {
           state.relevantFiles.add(pathArg);
         }
+        // Thin-runtime: remember read contents for contract confirmation.
+        if (pathArg && success && (name === "read" || name === "read_file" || name === "view_file")) {
+          readContents.set(pathArg, toolOutput.slice(0, 20_000));
+        }
+        // Phase 4C: track temp contract-test files for deletion before stop.
+        if (this.flags.contractTests && success && name === "write_file" && pathArg) {
+          if (/_contract_tmp_test\.go$|_eval_tmp_test\.go$|_contract_tmp_test\.py$|_eval_tmp\.py$/.test(pathArg)) {
+            tempTestFiles.add(pathArg);
+          }
+        }
         if (pathArg && success && ["write_file", "edit_file"].includes(name)) {
           state.modifiedFiles.add(pathArg);
           try {
@@ -1050,11 +1329,33 @@ export class Agent {
           }
         }
         if (name === "run_command" && success) {
+          const exitCode = extractExitCode(toolOutput) ?? -1;
           state.testResults.push({
             command: String(args.command ?? ""),
-            exitCode: extractExitCode(toolOutput) ?? -1,
+            exitCode,
             outputPreview: toolOutput.slice(-2000),
           });
+          // Thin-runtime verification signals (Phase 1 scorecard labels only).
+          const nonEmpty = toolOutput.replace(/exit code:\s*-?\d+/i, "").trim().length > 0;
+          if (exitCode === 0 && nonEmpty) {
+            const { isEmptyScriptSuccess } = await import("../tools/semantics.js").catch(() => ({ isEmptyScriptSuccess: null }));
+            const empty = typeof isEmptyScriptSuccess === "function"
+              ? (isEmptyScriptSuccess as (c: string, e: number, o: string, s: string) => boolean)(
+                String(args.command ?? ""),
+                exitCode,
+                toolOutput,
+                "",
+              )
+              : false;
+            if (!(this.flags.hygiene && empty)) {
+              verificationGreen = true;
+              lastBuildGreen = /go build|go test|tsc|npm test|pytest|ruff/i.test(String(args.command ?? "")) ? true : lastBuildGreen;
+            } else {
+              lastVerificationFailed = true;
+            }
+          } else if (exitCode !== 0) {
+            lastVerificationFailed = true;
+          }
         }
 
         return {
@@ -1140,6 +1441,7 @@ export class Agent {
           testResults: state.testResults,
           errors: state.errors,
           modifiedFilesCount: state.modifiedFiles.size,
+          hygieneOn: this.flags.hygiene,
         });
         if (verdict.stalled) {
           const stuck = {
@@ -1159,6 +1461,19 @@ export class Agent {
           this.emit({ type: "done", result: stuck });
           return stuck;
         }
+      }
+      // Phase 4D stopOnGreen nudge: once the last targeted check is green
+      // with real output, tell the model to conclude instead of wandering.
+      // Turns-to-green ignores post-green wandering, so this nudge is judged
+      // on total turns of passing tasks.
+      if (this.flags.stopOnGreen && verificationGreen && !greenNudgeSent && state.iteration < maxIterations) {
+        greenNudgeSent = true;
+        input.push({
+          role: "user",
+          content:
+            `Last targeted check is green with real output and no open errors. ` +
+            `Conclude now with the final summary — do not run extra reads, tests, or lint cycles because turns remain.`,
+        });
       }
     }
 

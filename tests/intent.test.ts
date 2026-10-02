@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { classifyIntent } from "../src/agent/intent.js";
+import { classifyIntent, fastGreetingResponse, isCurrentInfoQuery, isExactGreeting } from "../src/agent/intent.js";
 
 describe("classifyIntent", () => {
   it("classifies greetings and polite remarks as conversational", () => {
@@ -45,6 +45,37 @@ describe("classifyIntent", () => {
     expect(classifyIntent("can you see our conversation history?")).toBe("conversational");
     expect(classifyIntent("what did we discuss earlier?")).toBe("conversational");
     expect(classifyIntent("summarize our conversation")).toBe("conversational");
+  });
+
+  it("routes general knowledge to conversational (no repo tools)", () => {
+    // Manual-test regressions: these took 40-60s with full repo loads.
+    expect(classifyIntent("what is github?")).toBe("conversational");
+    expect(classifyIntent("what is codeagent?")).toBe("conversational");
+    expect(classifyIntent("explain recursion")).toBe("conversational");
+    expect(classifyIntent("what is docker?")).toBe("conversational");
+  });
+
+  it("keeps repo-scoped questions as inquiry", () => {
+    expect(classifyIntent("where is the App component defined?")).toBe("inquiry");
+    expect(classifyIntent("how does authentication work here?")).toBe("inquiry");
+    expect(classifyIntent("which file handles routing?")).toBe("inquiry");
+  });
+
+  it("routes current-info requests to external", () => {
+    expect(classifyIntent("which is latest claude model")).toBe("external");
+    expect(classifyIntent("can you search on web something like (which is latest claude model)")).toBe("external");
+    expect(classifyIntent("what is the latest version?")).toBe("external");
+    expect(isCurrentInfoQuery("which is latest claude model")).toBe(true);
+    expect(isCurrentInfoQuery("hello")).toBe(false);
+  });
+
+  it("fast-paths exact greetings without a model call", () => {
+    expect(isExactGreeting("hello")).toBe(true);
+    expect(isExactGreeting("hi")).toBe(true);
+    expect(isExactGreeting("thanks")).toBe(true);
+    expect(isExactGreeting("what is github?")).toBe(false);
+    expect(fastGreetingResponse("hello")).toMatch(/What would you like/);
+    expect(fastGreetingResponse("what is github?")).toBeNull();
   });
 });
 

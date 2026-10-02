@@ -28,6 +28,7 @@ export interface MinimalChatClient {
         messages: ChatMessage[];
         tools?: ChatTool[];
         stream?: boolean;
+        stream_options?: { include_usage?: boolean };
       }): Promise<
         | {
             choices: Array<{
@@ -361,8 +362,9 @@ export function createChatStreamProvider(opts: ChatStreamOptions): Provider {
           body: JSON.stringify({
             model: opts.model,
             messages,
-            tools: req.tools ? (toChatTools() as unknown as ChatTool[]) : undefined,
+            tools: req.tools ? (toChatTools({ exclude: req.exclude }) as unknown as ChatTool[]) : undefined,
             stream: true,
+            stream_options: { include_usage: true },
           }),
           signal: req.signal,
         }).then(async (r) => {
@@ -404,7 +406,8 @@ export function createChatResponder(
           model: args.model,
           messages,
           stream: true,
-          ...(useTools ? { tools: toChatTools() as unknown as ChatTool[] } : {}),
+          stream_options: { include_usage: true },
+          ...(useTools ? { tools: toChatTools({ exclude: options?.exclude }) as unknown as ChatTool[] } : {}),
         }),
       { signal: options?.signal, maxAttempts: 2 },
     );

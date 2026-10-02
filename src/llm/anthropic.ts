@@ -88,11 +88,11 @@ export async function* streamAnthropicChunks(source: AsyncIterable<AnthropicStre
   }
 }
 
-function toAnthropicTools(): Array<{ name: string; description?: string; input_schema: unknown }> {
+function toAnthropicTools(exclude?: string[]): Array<{ name: string; description?: string; input_schema: unknown }> {
   // Reuse the shared Responses tool defs, translated to Anthropic input_schema.
   // Import lazily to avoid cycles at module load.
   // eslint-disable-next-line @typescript-eslint/no-require-imports
-  const defs = (toChatTools() as Array<{ function: { name: string; description?: string; parameters?: unknown } }>).map(
+  const defs = (toChatTools({ exclude }) as Array<{ function: { name: string; description?: string; parameters?: unknown } }>).map(
     (t) => ({ name: t.function.name, description: t.function.description, input_schema: t.function.parameters ?? { type: "object" } }),
   );
   return defs;
@@ -231,7 +231,7 @@ export function createAnthropicProvider(opts: AnthropicProviderOptions): Provide
         model: opts.model,
         system,
         messages: toAnthropicMessages(req.messages),
-        tools: req.tools ? toAnthropicTools() : undefined,
+        tools: req.tools ? toAnthropicTools(req.exclude) : undefined,
         stream: true,
         max_tokens: getModelCapabilities(opts.model).maxOutput,
       };
