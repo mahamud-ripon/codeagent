@@ -1,13 +1,19 @@
 {
   "name": "@mahamud-ripon/codeagent",
-  "version": "0.8.0",
+  "version": "1.0.0",
   "description": "CLI-first autonomous coding agent",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/mahamud-ripon/codeagent.git"
   },
-  "keywords": ["ai", "coding-agent", "cli", "llm", "developer-tools"],
+  "keywords": [
+    "ai",
+    "coding-agent",
+    "cli",
+    "llm",
+    "developer-tools"
+  ],
   "type": "module",
   "bin": {
     "codeagent": "dist/index.js"
@@ -15,14 +21,20 @@
   "publishConfig": {
     "access": "public"
   },
-  "files": ["dist", "docs", "README.md", "LICENSE", "CHANGELOG.md"],
+  "files": [
+    "dist",
+    "docs",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
   "engines": {
     "node": ">=20"
   },
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc",
-    "bundle": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/codeagent.bundle.mjs --banner:js=\"#!/usr/bin/env node\"",
+    "bundle": "esbuild src/index.ts --bundle --platform=node --format=esm --packages=external --outfile=dist/codeagent.bundle.mjs",
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -31,7 +43,8 @@
     "eval:live": "tsx eval/live.ts",
     "eval:record": "tsx eval/record.ts",
     "eval:merge": "tsx eval/merge.ts",
-    "prepublishOnly": "npm run typecheck && npm run build"
+    "prepublishOnly": "npm run typecheck && npm run build",
+    "eval:release": "tsx eval/release.ts"
   },
   "dependencies": {
     "@clack/prompts": "^1.8.1",
@@ -48,5 +61,11 @@
     "tsx": "^4.0.0",
     "typescript": "^5.0.0",
     "vitest": "^4.0.0"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/sdk/query.d.ts",
+      "import": "./dist/sdk/query.js"
+    }
   }
 }

@@ -1,36 +1,40 @@
-# Quick start
+# Quick start (1.0)
 
 ```bash
 npm ci
 npm run typecheck
 npm test
-npm run eval   # smoke: 36 tasks, schema-valid
+npm run eval
+npm run build
+node dist/index.js --print "Explain this repository"
 ```
 
-## Interactive
+Configure a model through the existing provider environment variables or `~/.codeagent/.env`. Supported providers are OpenAI, Anthropic, Gemini, and OpenAI-compatible endpoints. Use `--provider` and `--model` to override selection.
+
+## Sessions
 
 ```bash
-npx tsx src/index.ts
-# or after build:
-npm run build && node dist/index.js
+codeagent "Implement the feature" --detach
+codeagent sessions
+codeagent --attach <session-id>
+codeagent steer <session-id> "Keep the public API compatible"
+codeagent pause <session-id>
+codeagent cancel <session-id>
+codeagent inspect <session-id>
 ```
 
-Slash commands: `/help /status /sessions /resume /new /undo /rewind /export /checkpoints /repo /model /provider /endpoint /key /sandbox /mcp /iterations /diff /plan /todos /compact /cost /init /mode /auto /manual /clear /exit`.
+Clients connect to a local supervisor. Disconnecting leaves work running. An unattended request for approval remains pending; attach interactively to answer it. Auto-approval requires an explicit option or permission rule.
 
-- `# note` appends to the memory file (`AGENTS.md` else `CODEAGENT.md` else `CLAUDE.md` else new `AGENTS.md`).
-- `/init` scaffolds `AGENTS.md` without overwriting.
-- `Shift+Tab` (or `/mode`) cycles `default → acceptEdits → plan → bypass`.
-- `--ui=next` opts into the streaming UI (`--ui=legacy` is default).
+The interactive prompt supports `/new`, `/status`, `/tasks`, `/agents`, `/jobs`, `/fork`, `/undo`, `/detach`, and `/exit`. Use settings and launch flags for model, sandbox, and permission configuration. See [migration](migration-1.0.md) for replaced legacy controls.
 
 ## Headless
 
 ```bash
 codeagent --print "Fix the failing test" --output-format stream-json
-echo "Summarize this repo" | codeagent --print
 ```
 
-Exit codes: 0 ok · 1 failure/stuck · 2 permission denied · 3 budget exceeded · 4 bad flags.
+Exit codes: 0 completed; 1 failed/blocked; 2 denied permission; 3 budget exhausted; 4 configuration error or input pending; 5 paused; 130 cancelled. Stream events include versioned session, run, agent, sequence, and correlation identifiers.
 
-## Providers
+## Release status
 
-`--provider openai|chat|anthropic|gemini`, `-e` for OpenAI-compat endpoints (Ollama, Groq, OpenRouter). Keys via env, `~/.codeagent/.env` (0600), or OS keychain when `keytar` is installed.
+The 1.0 candidate requires reliability CI on Linux, macOS, and Windows plus the matched live evaluation before publication. See [runtime architecture](runtime.md) and [SDK](sdk.md).

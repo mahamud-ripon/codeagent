@@ -42,7 +42,10 @@ interface ToolAcc {
 }
 
 /** Fold one chat-completions stream chunk into normalized events. */
-export function chatChunkToEvents(chunk: ChatStreamChunk, tools: Map<number, ToolAcc>): ProviderEvent[] {
+export function chatChunkToEvents(
+  chunk: ChatStreamChunk,
+  tools: Map<number, ToolAcc>,
+): ProviderEvent[] {
   const events: ProviderEvent[] = [];
   const choice = chunk.choices?.[0];
   const delta = choice?.delta;
@@ -59,7 +62,12 @@ export function chatChunkToEvents(chunk: ChatStreamChunk, tools: Map<number, Too
     const index = call.index ?? 0;
     let acc = tools.get(index);
     if (!acc) {
-      acc = { id: call.id || `call-${index}`, name: call.function?.name ?? "", arguments: "", started: false };
+      acc = {
+        id: call.id || `call-${index}`,
+        name: call.function?.name ?? "",
+        arguments: "",
+        started: false,
+      };
       tools.set(index, acc);
     }
     if (call.id) acc.id = call.id;
@@ -70,13 +78,19 @@ export function chatChunkToEvents(chunk: ChatStreamChunk, tools: Map<number, Too
     }
     if (call.function?.arguments) {
       acc.arguments += call.function.arguments;
-      events.push({ type: "tool_call_delta", id: acc.id, argumentsDelta: call.function.arguments });
+      events.push({
+        type: "tool_call_delta",
+        id: acc.id,
+        argumentsDelta: call.function.arguments,
+      });
     }
   }
   if (chunk.usage) {
     const u = chunk.usage;
     const reasoning =
-      u.reasoning_tokens ?? u.completion_tokens_details?.reasoning_tokens ?? null;
+      u.reasoning_tokens ??
+      u.completion_tokens_details?.reasoning_tokens ??
+      null;
     events.push({
       type: "usage",
       input: u.prompt_tokens ?? u.input_tokens ?? 0,
@@ -101,7 +115,9 @@ export function chatChunkToEvents(chunk: ChatStreamChunk, tools: Map<number, Too
   return events;
 }
 
-export async function* streamChatChunks(source: AsyncIterable<ChatStreamChunk>): AsyncGenerator<ProviderEvent> {
+export async function* streamChatChunks(
+  source: AsyncIterable<ChatStreamChunk>,
+): AsyncGenerator<ProviderEvent> {
   const tools = new Map<number, ToolAcc>();
   for await (const chunk of source) {
     for (const event of chatChunkToEvents(chunk, tools)) yield event;
@@ -109,7 +125,9 @@ export async function* streamChatChunks(source: AsyncIterable<ChatStreamChunk>):
 }
 
 /** Collapse a provider stream into the legacy non-streaming result. */
-export async function collectProviderEvents(events: AsyncIterable<ProviderEvent>): Promise<ResponsesCreateResult> {
+export async function collectProviderEvents(
+  events: AsyncIterable<ProviderEvent>,
+): Promise<ResponsesCreateResult> {
   let text = "";
   let thinking = "";
   let finish_reason: string | undefined;
@@ -161,9 +179,16 @@ export async function collectProviderEvents(events: AsyncIterable<ProviderEvent>
     try {
       if (call.arguments.trim()) JSON.parse(call.arguments);
     } catch {
-      throw new Error(`Chat stream truncated mid-tool-call (${call.name}); retryable`);
+      throw new Error(
+        `Chat stream truncated mid-tool-call (${call.name}); retryable`,
+      );
     }
-    output.push({ type: "function_call", call_id: id, name: call.name, arguments: call.arguments });
+    output.push({
+      type: "function_call",
+      call_id: id,
+      name: call.name,
+      arguments: call.arguments,
+    });
   }
   if (output.length === 0 && finish_reason === undefined) {
     throw new Error("Chat stream ended with no output (truncated); retryable");
@@ -172,7 +197,12 @@ export async function collectProviderEvents(events: AsyncIterable<ProviderEvent>
   if (!sawUsage) {
     // Provider omitted usage: estimate from text, never store silent 0.
     const est = Math.max(1, Math.round(text.length / 4));
-    usage = { input: 0, output: est, reasoningTokens: null, usageEstimated: true };
+    usage = {
+      input: 0,
+      output: est,
+      reasoningTokens: null,
+      usageEstimated: true,
+    };
   } else if (usage && usage.reasoningTokens === undefined) {
     usage.reasoningTokens = null;
   }
@@ -187,20 +217,31 @@ export async function collectProviderEvents(events: AsyncIterable<ProviderEvent>
 }
 
 /** Adapter so existing Agent tests keep calling a Responder during the migration. */
-export function providerToResponder(provider: Provider, system = ""): (input: unknown[], options?: { tools?: boolean; exclude?: string[]; signal?: AbortSignal }) => Promise<ResponsesCreateResult> {
+export function providerToResponder(
+  provider: Provider,
+  system = "",
+): (
+  input: unknown[],
+  options?: import("./client.js").ResponderOptions,
+) => Promise<ResponsesCreateResult> {
   return async (input, options) =>
     collectProviderEvents(
       provider.stream({
         system,
         messages: input,
         tools: options?.tools ?? true,
+        toolDefinitions: options?.toolDefinitions,
+        maxOutput: options?.maxOutput,
         exclude: options?.exclude,
         signal: options?.signal,
       }),
     );
 }
 
-export function scriptedProvider(events: ProviderEvent[], capabilities: ModelCapabilities = CONSERVATIVE_CAPABILITIES): Provider {
+export function scriptedProvider(
+  events: ProviderEvent[],
+  capabilities: ModelCapabilities = CONSERVATIVE_CAPABILITIES,
+): Provider {
   return {
     capabilities,
     async *stream() {
@@ -215,7 +256,10 @@ export function scriptedProvider(events: ProviderEvent[], capabilities: ModelCap
  * metric in §7). A stream with no content events reports its total time at
  * the end. The callback never throws into the stream.
  */
-export function withFirstTokenTiming(provider: Provider, onFirstToken: (ms: number) => void): Provider {
+export function withFirstTokenTiming(
+  provider: Provider,
+  onFirstToken: (ms: number) => void,
+): Provider {
   return {
     capabilities: provider.capabilities,
     async *stream(req: StreamRequest): AsyncGenerator<ProviderEvent> {
@@ -231,7 +275,11 @@ export function withFirstTokenTiming(provider: Provider, onFirstToken: (ms: numb
         }
       };
       for await (const event of provider.stream(req)) {
-        if (event.type === "text_delta" || event.type === "thinking_delta" || event.type === "tool_call_start") {
+        if (
+          event.type === "text_delta" ||
+          event.type === "thinking_delta" ||
+          event.type === "tool_call_start"
+        ) {
           report();
         }
         yield event;

@@ -9,9 +9,17 @@ const execAsync = promisify(exec);
  * Existing stopHooks.ts stays the built-in Stop hook; these are user hooks.
  */
 
-export type HookName = "SessionStart" | "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "Stop" | "PreCompact";
+export type HookName =
+  | "SessionStart"
+  | "UserPromptSubmit"
+  | "PreToolUse"
+  | "PostToolUse"
+  | "Stop"
+  | "PreCompact";
 
 export interface HookDef {
+  enforcement?: boolean;
+  timeoutMs?: number;
   matcher?: string;
   command: string;
 }

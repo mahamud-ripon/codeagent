@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+import { runSpawn, type SpawnRunOptions } from "./process.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import path from "node:path";
@@ -5,9 +7,7 @@ import {
   type CommandResult,
   type CommandRunner,
   DevLocalCommandRunner,
-  COMMAND_TIMEOUT_MS,
 } from "./runner.js";
-import { TRUNCATION_BUDGETS, truncate } from "../utils/truncate.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -15,18 +15,21 @@ export interface DockerSandboxOptions {
   image?: string;
   memoryLimit?: string;
   cpuLimit?: string;
+  network?: boolean;
+  mounts?: string[];
   fallbackRunner?: CommandRunner;
 }
 
 /**
  * Executes shell commands inside an isolated Docker container with volume-mounted workspace.
- * Gracefully falls back to DevLocalCommandRunner if Docker is unavailable.
+ * Requested isolation fails closed when Docker cannot execute it.
  */
 export class DockerCommandRunner implements CommandRunner {
   private image: string;
   private memoryLimit: string;
   private cpuLimit: string;
-  private fallback: CommandRunner;
+  private network: boolean;
+  private mounts: string[];
   private cachedAvailability: boolean | null = null;
   private lastCheckTime = 0;
 
@@ -34,7 +37,8 @@ export class DockerCommandRunner implements CommandRunner {
     this.image = options?.image ?? process.env.SANDBOX_IMAGE ?? "node:20-slim";
     this.memoryLimit = options?.memoryLimit ?? "2g";
     this.cpuLimit = options?.cpuLimit ?? "2";
-    this.fallback = options?.fallbackRunner ?? new DevLocalCommandRunner();
+    this.network = options?.network ?? false;
+    this.mounts = options?.mounts ?? [];
   }
 
   /**
@@ -47,9 +51,13 @@ export class DockerCommandRunner implements CommandRunner {
     }
 
     try {
-      await execFileAsync("docker", ["version", "--format", "{{.Server.Version}}"], {
-        timeout: 3_000,
-      });
+      await execFileAsync(
+        "docker",
+        ["version", "--format", "{{.Server.Version}}"],
+        {
+          timeout: 3_000,
+        },
+      );
       this.cachedAvailability = true;
     } catch {
       this.cachedAvailability = false;
@@ -58,33 +66,28 @@ export class DockerCommandRunner implements CommandRunner {
     return this.cachedAvailability;
   }
 
-  async run(repoRoot: string, command: string, signal?: AbortSignal): Promise<CommandResult> {
-    const available = await this.isDockerAvailable();
-    if (!available) {
-      const fallback = await this.fallback.run(repoRoot, command, signal);
-      const notice = "[sandbox: Docker unavailable, ran on local host — treat output as untrusted]";
-      return {
-        ...fallback,
-        combined: `${notice}\n${fallback.combined}`,
-      };
-    }
-
-    // Prepare workspace mount path
-    const resolved = path.resolve(repoRoot);
-    // On Windows, Docker CLI supports forward-slashed absolute paths (e.g. C:/Users/...:/workspace)
-    const mountPath = resolved.replace(/\\/g, "/");
-
-    const dockerArgs = [
+  async managed(repoRoot: string, command: string, opts: SpawnRunOptions = {}) {
+    if (!(await this.isDockerAvailable()))
+      throw new Error(
+        "Docker sandbox unavailable. Start Docker or explicitly select local execution.",
+      );
+    const name = `codeagent-${randomUUID()}`;
+    const args = [
       "run",
       "--rm",
+      "--name",
+      name,
       "-i",
-      "--network=none",
+      ...(this.network ? [] : ["--network=none"]),
+      ...this.mounts.flatMap((mount) => ["-v", mount]),
       "--cap-drop=ALL",
       "--pids-limit=256",
       "--user",
-      "node",
+      typeof process.getuid === "function"
+        ? `${process.getuid()}:${process.getgid!()}`
+        : "node",
       "-v",
-      `${mountPath}:/workspace`,
+      `${path.resolve(repoRoot).replace(/\\/g, "/")}:/workspace`,
       "-w",
       "/workspace",
       `--memory=${this.memoryLimit}`,
@@ -94,51 +97,40 @@ export class DockerCommandRunner implements CommandRunner {
       "-c",
       command,
     ];
-
+    const cleanup = () => {
+      void execFileAsync("docker", ["rm", "-f", name], {
+        timeout: 15000,
+      }).catch(() => {});
+    };
+    opts.signal?.addEventListener("abort", cleanup, { once: true });
     try {
-      const { stdout, stderr } = await execFileAsync("docker", dockerArgs, {
-        timeout: COMMAND_TIMEOUT_MS,
-        maxBuffer: 2 * 1024 * 1024,
-        signal,
+      return await runSpawn(repoRoot, command, {
+        ...opts,
+        executable: { file: "docker", args },
+        onExit: () => {
+          opts.signal?.removeEventListener("abort", cleanup);
+          cleanup();
+          opts.onExit?.();
+        },
       });
-      const combined = [stdout, stderr].filter(Boolean).join("\n");
-      return {
-        exitCode: 0,
-        stdout: truncate(stdout, TRUNCATION_BUDGETS.terminal),
-        stderr: truncate(stderr, TRUNCATION_BUDGETS.terminal),
-        combined: truncate(combined, TRUNCATION_BUDGETS.terminal),
-      };
-    } catch (error: unknown) {
-      const err = error as {
-        code?: number;
-        killed?: boolean;
-        stdout?: string;
-        stderr?: string;
-        message?: string;
-      };
-      if (err.killed) {
-        throw new Error(`Sandboxed command timed out after ${COMMAND_TIMEOUT_MS / 1000}s: ${command}`);
-      }
-      if (typeof err.code === "number") {
-        const stdout = String(err.stdout ?? "");
-        const stderr = String(err.stderr ?? "");
-        const combined = [stdout, stderr, `exit code: ${err.code}`].filter(Boolean).join("\n");
-        return {
-          exitCode: err.code,
-          stdout: truncate(stdout, TRUNCATION_BUDGETS.terminal),
-          stderr: truncate(stderr, TRUNCATION_BUDGETS.terminal),
-          combined: truncate(combined, TRUNCATION_BUDGETS.terminal),
-        };
-      }
-      // If docker run completely failed (e.g. daemon stopped mid-session), fall back
-      // explicitly so the agent knows isolation was lost (never silent).
-      const fallback = await this.fallback.run(repoRoot, command, signal);
-      const notice = `[sandbox: Docker run failed (${err.message ?? "unknown error"}), fell back to local host]`;
-      return {
-        ...fallback,
-        combined: `${notice}\n${fallback.combined}`,
-      };
+    } catch (error) {
+      cleanup();
+      throw error;
     }
+  }
+  async run(
+    repoRoot: string,
+    command: string,
+    signal?: AbortSignal,
+  ): Promise<CommandResult> {
+    const result = await this.managed(repoRoot, command, { signal });
+    const output = result.output.replace(/^exit code:.*\n?/, "");
+    return {
+      exitCode: result.exitCode,
+      stdout: output,
+      stderr: "",
+      combined: output,
+    };
   }
 }
 
@@ -150,13 +142,22 @@ let currentSandboxMode: "local" | "docker" = "local";
  * flip each other's mode mid-tool). Global activeRunner remains the
  * fallback for legacy callers; per-agent context.runner wins when present.
  */
-const sessionRunners = new Map<string, { runner: CommandRunner; mode: "local" | "docker" }>();
+const sessionRunners = new Map<
+  string,
+  { runner: CommandRunner; mode: "local" | "docker" }
+>();
 
-export function setSessionRunner(sessionId: string, runner: CommandRunner, mode: "local" | "docker"): void {
+export function setSessionRunner(
+  sessionId: string,
+  runner: CommandRunner,
+  mode: "local" | "docker",
+): void {
   sessionRunners.set(sessionId, { runner, mode });
 }
 
-export function getSessionRunner(sessionId: string): { runner: CommandRunner; mode: "local" | "docker" } | undefined {
+export function getSessionRunner(
+  sessionId: string,
+): { runner: CommandRunner; mode: "local" | "docker" } | undefined {
   return sessionRunners.get(sessionId);
 }
 
@@ -175,16 +176,22 @@ export interface SandboxConfig {
 /** SF-7: persistent per-session container (docker create/start/exec). */
 const persistentContainers = new Map<string, string>();
 
-export function sandboxConfigFromSettings(settings: { sandbox?: SandboxConfig }): SandboxConfig {
+export function sandboxConfigFromSettings(settings: {
+  sandbox?: SandboxConfig;
+}): SandboxConfig {
   return {
     mode: settings.sandbox?.mode ?? "local",
-    image: settings.sandbox?.image ?? process.env.SANDBOX_IMAGE ?? "node:20-slim",
+    image:
+      settings.sandbox?.image ?? process.env.SANDBOX_IMAGE ?? "node:20-slim",
     network: settings.sandbox?.network ?? true,
     mounts: settings.sandbox?.mounts ?? [],
   };
 }
 
-export async function ensurePersistentContainer(sessionId: string, config: SandboxConfig): Promise<string | null> {
+export async function ensurePersistentContainer(
+  sessionId: string,
+  config: SandboxConfig,
+): Promise<string | null> {
   if (config.mode !== "docker") return null;
   const existing = persistentContainers.get(sessionId);
   if (existing) return existing;
@@ -193,9 +200,11 @@ export async function ensurePersistentContainer(sessionId: string, config: Sandb
     const name = `codeagent-${sessionId.replace(/[^a-z0-9_-]/gi, "").slice(0, 32)}`;
     const args = [
       "create",
-      "--name", name,
+      "--name",
+      name,
       "-i",
-      "-w", "/workspace",
+      "-w",
+      "/workspace",
       "--memory=2g",
       "--cpus=2",
       "--pids-limit=256",
@@ -212,7 +221,9 @@ export async function ensurePersistentContainer(sessionId: string, config: Sandb
   }
 }
 
-export async function removePersistentContainer(sessionId: string): Promise<void> {
+export async function removePersistentContainer(
+  sessionId: string,
+): Promise<void> {
   const name = persistentContainers.get(sessionId);
   if (!name) return;
   persistentContainers.delete(sessionId);
@@ -251,12 +262,13 @@ export async function setSandboxMode(
       };
     }
     // Docker unavailable
-    activeRunner = new DevLocalCommandRunner();
-    currentSandboxMode = "local";
+    activeRunner = dockerRunner;
+    currentSandboxMode = "docker";
     return {
       success: false,
-      mode: "local",
-      message: "Docker daemon is not running or available. Remaining on local runner.",
+      mode: "docker",
+      message:
+        "Docker is unavailable. Commands remain blocked until Docker starts or local mode is explicitly selected.",
     };
   }
 

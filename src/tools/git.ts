@@ -1,3 +1,4 @@
+import { safeGitArgs } from "../utils/safeGit.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { TRUNCATION_BUDGETS, truncate } from "../utils/truncate.js";
@@ -6,11 +7,15 @@ const execFileAsync = promisify(execFile);
 
 async function git(repoRoot: string, args: string[]): Promise<string> {
   try {
-    const { stdout, stderr } = await execFileAsync("git", args, {
-      cwd: repoRoot,
-      maxBuffer: 2 * 1024 * 1024,
-      timeout: 30_000,
-    });
+    const { stdout, stderr } = await execFileAsync(
+      "git",
+      await safeGitArgs(repoRoot, args),
+      {
+        cwd: repoRoot,
+        maxBuffer: 2 * 1024 * 1024,
+        timeout: 30_000,
+      },
+    );
     return `${stdout}${stderr}`.trim() || "(clean)";
   } catch (error: unknown) {
     const err = error as { stdout?: string; stderr?: string; message?: string };
@@ -26,10 +31,14 @@ const gitRepoCache = new Map<string, boolean>();
 export async function isGitRepo(repoRoot: string): Promise<boolean> {
   if (gitRepoCache.has(repoRoot)) return gitRepoCache.get(repoRoot)!;
   try {
-    const { stdout } = await execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], {
-      cwd: repoRoot,
-      timeout: 5000,
-    });
+    const { stdout } = await execFileAsync(
+      "git",
+      ["rev-parse", "--is-inside-work-tree"],
+      {
+        cwd: repoRoot,
+        timeout: 5000,
+      },
+    );
     const inside = stdout.trim() === "true";
     gitRepoCache.set(repoRoot, inside);
     return inside;
@@ -52,11 +61,26 @@ export async function gitStatus(repoRoot: string): Promise<string> {
   return truncate(out, TRUNCATION_BUDGETS.gitStatus);
 }
 
-export async function gitDiff(repoRoot: string): Promise<string> {
+export async function gitDiff(
+  repoRoot: string,
+  readAllowed?: (file: string) => boolean,
+): Promise<string> {
   if (!(await isGitRepo(repoRoot))) {
     return "(not a git repository — git diff unavailable in this environment; verify files directly with read or list_files)";
   }
-  const out = await git(repoRoot, ["diff", "--no-ext-diff"]);
+  const paths = readAllowed
+    ? (await git(repoRoot, ["diff", "--name-only", "--no-renames", "-z"]))
+        .split("\0")
+        .filter((p) => p && readAllowed(p))
+    : undefined;
+  if (paths && !paths.length) return "(no permitted changes)";
+  const out = await git(repoRoot, [
+    "diff",
+    "--no-ext-diff",
+    "--no-textconv",
+    "--no-renames",
+    ...(paths ? ["--", ...paths] : []),
+  ]);
   return truncate(out || "(no changes)", TRUNCATION_BUDGETS.gitDiff);
 }
 
@@ -88,7 +112,11 @@ export async function createShadowCheckpoint(
     const stash = (await git(repoRoot, ["stash", "create", "-u"])).trim();
     if (stash && /^[0-9a-f]{4,40}$/i.test(stash)) {
       // stash create has no message; record the label via the ref only.
-      await git(repoRoot, ["update-ref", `refs/codeagent/checkpoints/${id}`, stash]);
+      await git(repoRoot, [
+        "update-ref",
+        `refs/codeagent/checkpoints/${id}`,
+        stash,
+      ]);
       return stash;
     }
   } catch {
@@ -102,13 +130,21 @@ export async function createShadowCheckpoint(
     let commitHash: string;
     try {
       const head = (await git(repoRoot, ["rev-parse", "HEAD"])).trim();
-      commitHash = (await git(repoRoot, ["commit-tree", tree, "-p", head, "-m", label])).trim();
+      commitHash = (
+        await git(repoRoot, ["commit-tree", tree, "-p", head, "-m", label])
+      ).trim();
     } catch {
       // Empty / initial repository with no commits yet
-      commitHash = (await git(repoRoot, ["commit-tree", tree, "-m", label])).trim();
+      commitHash = (
+        await git(repoRoot, ["commit-tree", tree, "-m", label])
+      ).trim();
     }
 
-    await git(repoRoot, ["update-ref", `refs/codeagent/checkpoints/${id}`, commitHash]);
+    await git(repoRoot, [
+      "update-ref",
+      `refs/codeagent/checkpoints/${id}`,
+      commitHash,
+    ]);
     return commitHash;
   } catch (error) {
     // If checkpoint fails (e.g. index locked), fail gracefully without stopping the agent
@@ -162,4 +198,3 @@ export async function restoreShadowCheckpoint(
     return false;
   }
 }
-

@@ -6,7 +6,10 @@ import {
   setActiveCommandRunner,
   setSandboxMode,
 } from "../src/tools/sandbox.js";
-import { DevLocalCommandRunner, type CommandRunner } from "../src/tools/terminal.js";
+import {
+  DevLocalCommandRunner,
+  type CommandRunner,
+} from "../src/tools/terminal.js";
 
 describe("DockerCommandRunner", () => {
   it("checks Docker availability without throwing", async () => {
@@ -15,7 +18,7 @@ describe("DockerCommandRunner", () => {
     expect(typeof available).toBe("boolean");
   });
 
-  it("falls back to fallback runner when Docker is not available", async () => {
+  it("fails closed when Docker is not available", async () => {
     const fakeFallback: CommandRunner = {
       run: async () => ({
         exitCode: 0,
@@ -29,14 +32,17 @@ describe("DockerCommandRunner", () => {
     // Force isDockerAvailable to return false for test
     runner.isDockerAvailable = async () => false;
 
-    const res = await runner.run(".", "echo hello");
-    expect(res.stdout).toBe("fallback executed");
+    await expect(runner.run(".", "echo hello")).rejects.toThrow(
+      "Docker sandbox unavailable",
+    );
   });
 
   it("manages global sandbox mode and runner switching", async () => {
     await setSandboxMode("local");
     expect(getSandboxMode()).toBe("local");
-    expect(getActiveCommandRunner() instanceof DevLocalCommandRunner).toBe(true);
+    expect(getActiveCommandRunner() instanceof DevLocalCommandRunner).toBe(
+      true,
+    );
 
     const customRunner: CommandRunner = {
       run: async () => ({ exitCode: 0, stdout: "", stderr: "", combined: "" }),

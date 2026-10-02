@@ -22,3 +22,5 @@ jobs:
       - run: npm test
       - run: npm run eval
       - run: npm run bundle
+      - run: npm run eval:release -- --check
+      - run: node --check extensions/vscode/extension.js

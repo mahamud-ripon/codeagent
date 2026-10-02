@@ -1,3 +1,11 @@
+# 1.0.0 — implementation candidate
+
+- Replace separate agent loops with a shared typed runtime and durable local supervisor.
+- Add authenticated IPC, detach/attach, resume/fork, approvals, task graphs, mailboxes, and isolated coding workers.
+- Tie verification to workspace state; add inherited tool policy, checkpoints, and fail-closed Docker execution.
+- Introduce SDK run handles and IDE protocol 1.0; see docs/migration-1.0.md.
+- Add reliability tests and a frozen paired release evaluation. Live quality gate remains required before publication.
+
 # Changelog
 
 All notable changes to CodeAgent. Format follows Keep a Changelog; versioning follows SemVer.

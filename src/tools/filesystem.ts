@@ -10,22 +10,60 @@ const MAX_LIST_FILES = 5000;
 /** Binary-ish extensions mapped to a human-readable category. */
 const BINARY_EXTENSIONS = new Map<string, string>([
   // Images
-  ["png", "image"], ["jpg", "image"], ["jpeg", "image"], ["gif", "image"],
-  ["bmp", "image"], ["webp", "image"], ["ico", "image"], ["tiff", "image"],
-  ["tif", "image"], ["avif", "image"], ["heic", "image"], ["psd", "image"],
+  ["png", "image"],
+  ["jpg", "image"],
+  ["jpeg", "image"],
+  ["gif", "image"],
+  ["bmp", "image"],
+  ["webp", "image"],
+  ["ico", "image"],
+  ["tiff", "image"],
+  ["tif", "image"],
+  ["avif", "image"],
+  ["heic", "image"],
+  ["psd", "image"],
   // Media
-  ["mp3", "media"], ["wav", "media"], ["flac", "media"], ["ogg", "media"],
-  ["m4a", "media"], ["mp4", "media"], ["avi", "media"], ["mov", "media"],
-  ["mkv", "media"], ["webm", "media"], ["wmv", "media"],
+  ["mp3", "media"],
+  ["wav", "media"],
+  ["flac", "media"],
+  ["ogg", "media"],
+  ["m4a", "media"],
+  ["mp4", "media"],
+  ["avi", "media"],
+  ["mov", "media"],
+  ["mkv", "media"],
+  ["webm", "media"],
+  ["wmv", "media"],
   // Archives, executables, fonts, office documents, databases
-  ["zip", "binary"], ["tar", "binary"], ["gz", "binary"], ["bz2", "binary"],
-  ["7z", "binary"], ["rar", "binary"], ["exe", "binary"], ["dll", "binary"],
-  ["so", "binary"], ["dylib", "binary"], ["bin", "binary"], ["iso", "binary"],
-  ["jar", "binary"], ["class", "binary"], ["wasm", "binary"], ["pdf", "binary"],
-  ["doc", "binary"], ["docx", "binary"], ["xls", "binary"], ["xlsx", "binary"],
-  ["ppt", "binary"], ["pptx", "binary"], ["ttf", "binary"], ["otf", "binary"],
-  ["woff", "binary"], ["woff2", "binary"], ["eot", "binary"],
-  ["sqlite", "binary"], ["db", "binary"],
+  ["zip", "binary"],
+  ["tar", "binary"],
+  ["gz", "binary"],
+  ["bz2", "binary"],
+  ["7z", "binary"],
+  ["rar", "binary"],
+  ["exe", "binary"],
+  ["dll", "binary"],
+  ["so", "binary"],
+  ["dylib", "binary"],
+  ["bin", "binary"],
+  ["iso", "binary"],
+  ["jar", "binary"],
+  ["class", "binary"],
+  ["wasm", "binary"],
+  ["pdf", "binary"],
+  ["doc", "binary"],
+  ["docx", "binary"],
+  ["xls", "binary"],
+  ["xlsx", "binary"],
+  ["ppt", "binary"],
+  ["pptx", "binary"],
+  ["ttf", "binary"],
+  ["otf", "binary"],
+  ["woff", "binary"],
+  ["woff2", "binary"],
+  ["eot", "binary"],
+  ["sqlite", "binary"],
+  ["db", "binary"],
 ]);
 
 function binaryFileError(relative: string, category: string): Error {
@@ -42,7 +80,10 @@ function binaryFileError(relative: string, category: string): Error {
  * catches extensionless binaries. Reading these as UTF-8 would only inject
  * garbage into the model context.
  */
-async function assertNotBinary(absolute: string, relative: string): Promise<void> {
+async function assertNotBinary(
+  absolute: string,
+  relative: string,
+): Promise<void> {
   const ext = path.extname(absolute).toLowerCase().replace(/^\./, "");
   const category = BINARY_EXTENSIONS.get(ext);
   if (category) {
@@ -70,7 +111,10 @@ function assertNotSecret(repoRelative: string): void {
 
 export function assertNotProtected(repoRelative: string): void {
   const normalized = repoRelative.replace(/\\/g, "/");
-  if (/(^|\/)\.git(\/|$)/i.test(normalized) || /(^|\/)\.codeagent(\/|$)/i.test(normalized)) {
+  if (
+    /(^|\/)\.git(\/|$)/i.test(normalized) ||
+    /(^|\/)\.codeagent(\/|$)/i.test(normalized)
+  ) {
     throw new Error(`Refusing to modify protected path: ${repoRelative}`);
   }
   const base = normalized.split("/").pop() ?? normalized;
@@ -79,7 +123,12 @@ export function assertNotProtected(repoRelative: string): void {
   }
 }
 
-export async function listFiles(repoRoot: string, relative = ".", hygieneOn = false): Promise<string> {
+export async function listFiles(
+  repoRoot: string,
+  relative = ".",
+  hygieneOn = false,
+  readAllowed?: (file: string) => boolean,
+): Promise<string> {
   const root = path.resolve(repoRoot);
   const startDir = resolveInsideRepo(root, relative);
 
@@ -88,7 +137,8 @@ export async function listFiles(repoRoot: string, relative = ".", hygieneOn = fa
     stat = await fs.stat(startDir);
   } catch (e) {
     const code = (e as NodeJS.ErrnoException).code;
-    if (code === "EACCES" || code === "EPERM") throw new Error(`Permission denied: ${relative}`);
+    if (code === "EACCES" || code === "EPERM")
+      throw new Error(`Permission denied: ${relative}`);
     throw new Error(`Path does not exist: ${relative}`);
   }
   if (!stat.isDirectory()) {
@@ -113,7 +163,9 @@ export async function listFiles(repoRoot: string, relative = ".", hygieneOn = fa
     try {
       entries = await fs.readdir(dir, { withFileTypes: true });
     } catch (e) {
-      unreadable.push(`${path.relative(root, dir).split(path.sep).join("/")}: ${(e as Error).message}`);
+      unreadable.push(
+        `${path.relative(root, dir).split(path.sep).join("/")}: ${(e as Error).message}`,
+      );
       return;
     }
     for (const entry of entries) {
@@ -122,7 +174,8 @@ export async function listFiles(repoRoot: string, relative = ".", hygieneOn = fa
       if (entry.isDirectory()) {
         await walk(full);
       } else {
-        results.push(path.relative(root, full).split(path.sep).join("/"));
+        const relative = path.relative(root, full).split(path.sep).join("/");
+        if (!readAllowed || readAllowed(relative)) results.push(relative);
       }
       if (results.length >= MAX_LIST_FILES) {
         truncated = true;
@@ -134,12 +187,16 @@ export async function listFiles(repoRoot: string, relative = ".", hygieneOn = fa
   await walk(startDir);
 
   const parts = [results.join("\n")];
-  if (unreadable.length > 0) parts.push(`[unreadable: ${unreadable.slice(0, 5).join("; ")}]`);
+  if (unreadable.length > 0)
+    parts.push(`[unreadable: ${unreadable.slice(0, 5).join("; ")}]`);
   if (truncated) parts.push(`[...truncated at ${MAX_LIST_FILES} files]`);
   return truncate(parts.join("\n"), TRUNCATION_BUDGETS.listFiles);
 }
 
-export async function readFile(repoRoot: string, filePath: string): Promise<string> {
+export async function readFile(
+  repoRoot: string,
+  filePath: string,
+): Promise<string> {
   assertNotSecret(filePath);
   const absolute = resolveInsideRepo(repoRoot, filePath);
 
@@ -238,7 +295,8 @@ export async function readPath(
     return readFile(repoRoot, filePath);
   }
   const startLine = options?.offset ?? 1;
-  const endLine = options?.limit !== undefined ? startLine + options.limit - 1 : undefined;
+  const endLine =
+    options?.limit !== undefined ? startLine + options.limit - 1 : undefined;
   return viewFile(repoRoot, filePath, { startLine, endLine });
 }
 
@@ -249,7 +307,9 @@ export async function writeFile(
 ): Promise<string> {
   assertNotSecret(filePath);
   if (content.length > 500_000) {
-    throw new Error("Content too large (500k char limit). Write smaller files.");
+    throw new Error(
+      "Content too large (500k char limit). Write smaller files.",
+    );
   }
   validateSyntaxPreFlight(content, filePath);
   const absolute = resolveInsideRepo(repoRoot, filePath);
@@ -267,7 +327,11 @@ export interface EditOptions {
   rebase?: boolean;
 }
 
-function formatSnippetLines(content: string, centerLine: number, context = 20): string {
+function formatSnippetLines(
+  content: string,
+  centerLine: number,
+  context = 20,
+): string {
   const lines = content.split(/\r?\n/);
   const total = lines.length;
   const start = Math.max(1, centerLine - context);
@@ -315,16 +379,14 @@ export async function editFile(
   const content = await fs.readFile(absolute, "utf8");
 
   try {
-    const { updated, strategy, replacements, diffPreview } = applyMultiStrategyPatch(
-      content,
-      oldText,
-      newText,
-      filePath,
-      options,
-    );
+    const { updated, strategy, replacements, diffPreview } =
+      applyMultiStrategyPatch(content, oldText, newText, filePath, options);
     await fs.writeFile(absolute, updated, "utf8");
-    const count = replacements && replacements > 1 ? `, replacements: ${replacements}` : "";
-    const preview = diffPreview ? `\nDiff preview (confirm this is the intended region):\n${diffPreview}` : "";
+    const count =
+      replacements && replacements > 1 ? `, replacements: ${replacements}` : "";
+    const preview = diffPreview
+      ? `\nDiff preview (confirm this is the intended region):\n${diffPreview}`
+      : "";
     let snippet = "";
     if (options?.snippet) {
       const center = findCenterLine(updated, newText);
@@ -335,9 +397,19 @@ export async function editFile(
     // Phase 2 hygiene (editRebase): stale old_text rebases without a model turn.
     // The tool already re-read fresh bytes above; when the match is ambiguous
     // return the current snippet so the next edit can proceed directly.
-    if (options?.rebase && e instanceof Error && /old_text was not found/i.test(e.message)) {
-      const snippet = formatSnippetLines(content, findCenterLine(content, oldText), 10);
-      throw new Error(`${e.message}\n[Current file snippet — retry with an exact copy from below, no re-read needed]\n${snippet}`);
+    if (
+      options?.rebase &&
+      e instanceof Error &&
+      /old_text was not found/i.test(e.message)
+    ) {
+      const snippet = formatSnippetLines(
+        content,
+        findCenterLine(content, oldText),
+        10,
+      );
+      throw new Error(
+        `${e.message}\n[Current file snippet — retry with an exact copy from below, no re-read needed]\n${snippet}`,
+      );
     }
     throw e;
   }
@@ -356,7 +428,8 @@ export async function multiEdit(
   edits: MultiEdit[],
   options?: EditOptions,
 ): Promise<string> {
-  if (edits.length === 0) throw new Error("multi_edit requires at least one edit");
+  if (edits.length === 0)
+    throw new Error("multi_edit requires at least one edit");
   assertNotSecret(filePath);
   const absolute = resolveInsideRepo(repoRoot, filePath);
   await assertRealpathInsideRepo(repoRoot, absolute);
@@ -378,16 +451,28 @@ export async function multiEdit(
   const strategies: string[] = [];
   try {
     for (const edit of edits) {
-      const result = applyMultiStrategyPatch(content, edit.oldText, edit.newText, filePath, {
-        replaceAll: edit.replaceAll,
-      });
+      const result = applyMultiStrategyPatch(
+        content,
+        edit.oldText,
+        edit.newText,
+        filePath,
+        {
+          replaceAll: edit.replaceAll,
+        },
+      );
       content = result.updated;
       strategies.push(result.strategy);
     }
   } catch (e) {
-    if (options?.rebase && e instanceof Error && /old_text was not found/i.test(e.message)) {
+    if (
+      options?.rebase &&
+      e instanceof Error &&
+      /old_text was not found/i.test(e.message)
+    ) {
       const snippet = formatSnippetLines(original, 1, 10);
-      throw new Error(`${e.message}\n[Current file snippet — retry with an exact copy from below, no re-read needed]\n${snippet}`);
+      throw new Error(
+        `${e.message}\n[Current file snippet — retry with an exact copy from below, no re-read needed]\n${snippet}`,
+      );
     }
     throw e;
   }

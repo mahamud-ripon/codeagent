@@ -1,22 +1,16 @@
-# SDK (`@codeagent/core` shape)
-
-`src/sdk/query.ts` exposes the same `AgentEvent` stream the TUI consumes:
+# SDK 1.0
 
 ```ts
-import { query } from "./src/sdk/query.js";
-
-for await (const event of query("Fix the failing test.", {
-  repoRoot: process.cwd(),
-  model: "gpt-5.6-luna",
-  provider: "openai",
-  maxIterations: 30,
-})) {
-  if (event.type === "text_delta") process.stdout.write(event.text);
-}
-// yields { type: "done", result } at the end; resolves { finalMessage }
+import { query, RuntimeClient } from '@mahamud-ripon/codeagent';
+const run = await query('Fix the tests', { repoRoot: process.cwd(), model: process.env.MODEL });
+for await (const event of run.events()) console.log(event);
+const result = await run.result();
 ```
 
-- Streaming by default (`providerInstance` on every backend, including OpenAI-compatible chat SSE).
-- Roles/hooks/capabilities mirror the CLI (`model.main/fast/plan`, settings hooks).
-- Headless callers get stable exit codes via `exitCodeForStopReason` (`src/cli/headless.ts`).
-- Publish shape: `dist/` + `docs/` + README/LICENSE/CHANGELOG (`files` in package.json); `npm run bundle` emits a single-file `dist/codeagent.bundle.mjs` via esbuild.
+`RunHandle` provides `events(afterSequence)`, `result()`, `steer(text)`, `answer(requestId, answer)`, `pause()`, `cancel()`, and `detach()`. Disconnecting an event consumer leaves execution running. `RuntimeClient.attach(sessionId)` replays the durable run. Request IDs deduplicate submissions; changed content under the same ID is rejected.
+
+Approval and input events carry a request ID in `data.id`. Display `data.prompt`, collect an explicit decision, and call `run.answer(id, boolean)` for approval or `run.answer(id, string)` for input. A detached request remains pending.
+
+Events are versioned and carry session/run/agent IDs, a monotonically increasing session sequence, a correlation ID, and timestamp. Exactly one coordinator `done` is emitted per run. Child `done` events do not end a parent stream.
+
+`AgentRuntime` is also exported for embedding or injected-provider tests. Embedders own its persistence and lifecycle; production `query` uses the supervisor. A `SessionStore` implementation and per-run provider/tool definitions provide test seams without real credentials.

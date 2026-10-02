@@ -54,13 +54,18 @@ export interface ResponsesCreateResult {
 }
 
 export interface ResponderOptions {
+  maxOutput?: number;
+  toolDefinitions?: import("./events.js").WireTool[];
   tools?: boolean;
   signal?: AbortSignal;
   /** Tool names to hide from the model (capability-aware exposure). */
   exclude?: string[];
 }
 
-export type Responder = (input: unknown[], options?: ResponderOptions) => Promise<ResponsesCreateResult>;
+export type Responder = (
+  input: unknown[],
+  options?: ResponderOptions,
+) => Promise<ResponsesCreateResult>;
 
 export function createResponder(
   client: OpenAI,
@@ -70,11 +75,16 @@ export function createResponder(
     const { tools } = await import("./tools.js");
     const useTools = options?.tools ?? true;
     const exclude = options?.exclude ?? [];
-    const filtered = exclude.length > 0 ? tools.filter((t) => !exclude.includes(t.name)) : tools;
+    const available = options?.toolDefinitions ?? tools;
+    const filtered =
+      exclude.length > 0
+        ? available.filter((t) => !exclude.includes(t.name))
+        : available;
     const response = await withProviderRetry(
       () =>
         client.responses.create({
           model: args.model,
+          max_output_tokens: options?.maxOutput,
           instructions: args.instructions,
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           tools: useTools ? (filtered as any) : undefined,
@@ -87,12 +97,18 @@ export function createResponder(
       output: response.output as unknown as Array<Record<string, unknown>>,
       output_text: response.output_text,
       status: (response as { status?: string }).status,
-      incomplete_details: (response as { incomplete_details?: { reason?: string } | null }).incomplete_details,
-      usage: (response as { usage?: {
-        input_tokens?: number;
-        output_tokens?: number;
-        input_tokens_details?: { cached_tokens?: number };
-      } }).usage,
+      incomplete_details: (
+        response as { incomplete_details?: { reason?: string } | null }
+      ).incomplete_details,
+      usage: (
+        response as {
+          usage?: {
+            input_tokens?: number;
+            output_tokens?: number;
+            input_tokens_details?: { cached_tokens?: number };
+          };
+        }
+      ).usage,
     });
   };
 }

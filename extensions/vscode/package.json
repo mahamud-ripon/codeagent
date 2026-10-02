@@ -2,7 +2,7 @@
   "name": "codeagent-vscode",
   "displayName": "CodeAgent",
   "description": "Autonomous AI coding agent inside VS Code powered by CodeAgent ACP bridge.",
-  "version": "0.8.0",
+  "version": "1.0.0",
   "publisher": "mahamud-ripon",
   "license": "MIT",
   "repository": {
@@ -56,6 +56,22 @@
       {
         "command": "codeagent.generateTests",
         "title": "CodeAgent: Generate Unit Tests"
+      },
+      {
+        "command": "codeagent.attachSession",
+        "title": "CodeAgent: Attach Session"
+      },
+      {
+        "command": "codeagent.detachSession",
+        "title": "CodeAgent: Detach Session"
+      },
+      {
+        "command": "codeagent.steerTask",
+        "title": "CodeAgent: Steer Running Task"
+      },
+      {
+        "command": "codeagent.inspectSession",
+        "title": "CodeAgent: Inspect Tasks, Workers, Jobs and Verification"
       }
     ],
     "viewsContainers": {
@@ -117,7 +133,7 @@
         },
         "codeagent.autoApprove": {
           "type": "boolean",
-          "default": true,
+          "default": false,
           "description": "Automatically approve tool operations without interactive confirmation."
         },
         "codeagent.model": {

@@ -1,6 +1,9 @@
 import { executeTool } from "../tools/index.js";
 import type { Responder } from "../llm/client.js";
-import { createProviderFromEnv, type ProviderOverrides } from "../llm/provider.js";
+import {
+  createProviderFromEnv,
+  type ProviderOverrides,
+} from "../llm/provider.js";
 import { truncate } from "../utils/truncate.js";
 
 export type SubagentType = "explore" | "plan" | (string & {});
@@ -100,117 +103,44 @@ export async function runSubagent(
   task: string,
   options?: SubagentOptions,
 ): Promise<string> {
-  const envCap = Number(process.env.SUBAGENT_MAX_ITERATIONS ?? 0);
-  const maxIterations = options?.maxIterations
-    ?? (Number.isFinite(envCap) && envCap > 0 ? Math.min(20, Math.floor(envCap)) : 5);
-  const signal = options?.signal;
-  const subagentType = options?.subagentType ?? "explore";
-  let systemPrompt = options?.systemPrompt
-    ?? (subagentType === "plan" ? PLAN_SYSTEM_PROMPT : subagentType === "reviewer" ? REVIEWER_SYSTEM_PROMPT : EXPLORE_SYSTEM_PROMPT);
-  // User-defined subagents (AG-12): resolve Markdown defs by name when no explicit prompt given.
-  // Def `tools` restrict the call set; def `model` selects the responder model.
-  let defTools: string[] | undefined;
-  let defModel: string | undefined;
-  if (!options?.systemPrompt && subagentType !== "explore" && subagentType !== "plan" && subagentType !== "reviewer") {
-    try {
-      const { loadSubagentDefs } = await import("./subagentsRegistry.js");
-      const defs = await loadSubagentDefs(options?.repoRoot ?? repoRoot);
-      const def = defs.find((d) => d.name === subagentType);
-      if (def?.systemPrompt) systemPrompt = def.systemPrompt;
-      defTools = def?.tools;
-      defModel = def?.model;
-    } catch {
-      // fall back to explorer prompt
-    }
-  }
-  // AG-12 enforcement: effective allow-set is def.tools ?? explicit allowedTools ?? read-only base.
-  const effectiveAllowed = new Set(
-    options?.allowedTools ?? defTools ?? [...BASE_ALLOWED_SUBAGENT_TOOLS],
+  const { AgentRuntime } = await import("../runtime/runtime.js");
+  const { loadSubagentDefs } = await import("./subagentsRegistry.js");
+  const type = options?.subagentType ?? "explore";
+  const definition = (await loadSubagentDefs(repoRoot)).find(
+    (d) => d.name === type,
   );
-  const allowed = effectiveAllowed;
-  const providerOverrides = {
-    ...(options?.providerOverrides ?? {}),
-    // Def model wins when the caller did not pin one explicitly.
-    ...(defModel && !options?.providerOverrides?.model ? { model: defModel } : {}),
+  const overrides = {
+    ...options?.providerOverrides,
+    model: options?.providerOverrides?.model ?? definition?.model,
   };
-  const responder =
-    options?.responder ??
-    (options?.createResponder
-      ? options.createResponder(providerOverrides)
-      : createProviderFromEnv(process.env, providerOverrides).responder);
-
-  const history: unknown[] = [
-    { role: "system", content: systemPrompt },
-    { role: "user", content: `Research Task: ${task}` },
-  ];
-
-  for (let i = 0; i < maxIterations; i++) {
-    if (signal?.aborted) {
-      throw new Error("Subagent cancelled by user.");
-    }
-
-    const result = await responder(history);
-    for (const item of result.output) history.push(item);
-
-    const toolCalls = result.output.filter((item) => item.type === "function_call");
-
-    if (toolCalls.length === 0) {
-      const summary = result.output_text?.trim() || "Subagent finished with no findings.";
-      return `[SUBAGENT RESEARCH COMPLETE]\n${summary}\n\n[DIRECTIVE FOR MAIN AGENT]: Research has finished. Present the findings above to the user immediately or proceed to implementation. Do NOT re-read these files.`;
-    }
-
-    for (const call of toolCalls) {
-      if (signal?.aborted) throw new Error("Subagent cancelled by user.");
-      const callId = call.call_id ?? `subcall-${i}`;
-      const name = String(call.name ?? "unknown");
-
-      // AG-12: enforce the effective allow-set (def.tools or read-only base).
-      if (!allowed.has(name)) {
-        const errorMsg = options?.allowedTools || defTools
-          ? `TOOL ERROR (${name}): Subagent '${subagentType}' cannot call '${name}'. Allowed: ${[...allowed].join(", ")}.`
-          : `TOOL ERROR (${name}): Subagents only have read-only permissions. Cannot call '${name}'.`;
-        history.push({ type: "function_call_output", call_id: callId, output: errorMsg });
-        continue;
-      }
-
-      let args: Record<string, unknown> = {};
-      try {
-        args = call.arguments ? JSON.parse(call.arguments) : {};
-      } catch {
-        history.push({
-          type: "function_call_output",
-          call_id: callId,
-          output: `TOOL ERROR (${name}): Malformed JSON arguments.`,
-        });
-        continue;
-      }
-
-      let output: string;
-      try {
-        output = await executeTool(repoRoot, name, args, signal);
-        output = truncate(output, 8_000);
-      } catch (err) {
-        output = `TOOL ERROR (${name}): ${err instanceof Error ? err.message : String(err)}`;
-      }
-
-      history.push({ type: "function_call_output", call_id: callId, output });
-    }
-  }
-
-  // If subagent exhausted iterations while reading files, do a fast rollup pass
-  try {
-    const finalPass = await responder([
-      ...history,
-      {
-        role: "user",
-        content: "Summarize everything you learned from the files inspected above now.",
-      },
-    ]);
-    const summary = finalPass.output_text?.trim() || "Subagent completed exploration.";
-    return `[SUBAGENT RESEARCH COMPLETE]\n${summary}\n\n[DIRECTIVE FOR MAIN AGENT]: Research has finished. Present the findings above to the user immediately or proceed to implementation. Do NOT re-read these files.`;
-  } catch {
-    return "[SUBAGENT RESEARCH COMPLETE]\nExploration completed across inspected files.\n\n[DIRECTIVE FOR MAIN AGENT]: Present findings to the user now.";
-  }
+  const responder = options?.responder ?? options?.createResponder?.(overrides);
+  const requested = options?.allowedTools ??
+    definition?.tools ?? [...BASE_ALLOWED_SUBAGENT_TOOLS];
+  const allowedTools = requested.filter((name) =>
+    BASE_ALLOWED_SUBAGENT_TOOLS.has(name),
+  );
+  const agent = new AgentRuntime({
+    repoRoot,
+    model: overrides.model ?? process.env.MODEL ?? "gpt-5.6-luna",
+    maxIterations: options?.maxIterations ?? 5,
+    provider: overrides.provider,
+    baseURL: overrides.baseURL,
+    responder,
+    allowedTools,
+    depth: 1,
+    role: type,
+    systemPrompt:
+      options?.systemPrompt ??
+      (type === "plan"
+        ? PLAN_SYSTEM_PROMPT
+        : type === "reviewer"
+          ? REVIEWER_SYSTEM_PROMPT
+          : definition?.systemPrompt) ??
+      EXPLORE_SYSTEM_PROMPT,
+    verbose: false,
+  });
+  const result = await agent.run(task, { signal: options?.signal });
+  return `[SUBAGENT RESEARCH COMPLETE]\n${result.finalMessage}`;
 }
 
 /**
@@ -230,12 +160,18 @@ export async function runSubagentsParallel(
       const idx = next++;
       const t = tasks[idx]!;
       try {
-        results[idx] = await runSubagent(repoRoot, t.task, { ...options, subagentType: t.subagentType ?? options?.subagentType });
+        results[idx] = await runSubagent(repoRoot, t.task, {
+          ...options,
+          subagentType: t.subagentType ?? options?.subagentType,
+        });
       } catch (e) {
-        results[idx] = `TOOL ERROR (run_subagent): ${e instanceof Error ? e.message : String(e)}`;
+        results[idx] =
+          `TOOL ERROR (run_subagent): ${e instanceof Error ? e.message : String(e)}`;
       }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker()));
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, tasks.length) }, () => worker()),
+  );
   return results;
 }

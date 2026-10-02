@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "baselineRevision": "71cecc9252809a53de082953dc7c7b558eaefe8e",
+  "suites": {
+    "eval/tasks-heldout-v1.json": "38077879c09973cd02400655c3eb5745c16d2f720c44cada941cbf2f577b8cb2",
+    "eval/tasks-advanced-v2.json": "4c2a7f84b6451a1e3e95fd6cc94cfb8b2f303f008b74b2e70b5c42539757142e"
+  },
+  "repetitions": 3,
+  "modelCalls": 30,
+  "wallTimeSeconds": 600,
+  "requiredImprovementPercentagePoints": 10,
+  "status": "live evaluation required"
+}

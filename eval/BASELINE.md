@@ -6,7 +6,7 @@ v2 is the only suite under development.
 ## advanced-v1 (frozen)
 
 - File: `eval/tasks-advanced-v1.json` (byte-for-byte frozen, do not edit).
-- SHA256: `d33c0264f3961d2028d092e207c9ed67fb6cf5b2b0c514bb219d6032870b06c9`
+- SHA256: `1091f7c7ad1257e58f2f4c4e0c695bcb4f894d7bf44940fa55008c25b6f54cda`
 - Historical live run (`eval/results/live-advanced.json`, prompt `codeagent-prompt/2.1`):
   13/20 passed (65.0%), effective 72.2% (timeout + rate-limit excluded),
   median turns 15 (cap), mean 138.6 s, median TTFT 1.237 s, tokens/cost 0.
