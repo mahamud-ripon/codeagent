@@ -1,0 +1,2 @@
+# Evaluation suites have frozen byte hashes. Keep checkout bytes stable on Windows.
+eval/tasks*.json text eol=lf

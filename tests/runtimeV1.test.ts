@@ -20,15 +20,23 @@ import { RuntimeClient } from "../src/runtime/client.js";
 import { compactMessages, ProjectMemory } from "../src/runtime/context.js";
 import { DockerCommandRunner } from "../src/tools/sandbox.js";
 const dirs: string[] = [];
+// These tests launch many real Git processes; Windows runners need more than 5s.
+const GIT_INTEGRATION_TIMEOUT = 30_000;
 async function temp() {
   const d = await fs.mkdtemp(path.join(os.tmpdir(), "codeagent-runtime-"));
   dirs.push(d);
   return d;
 }
 afterEach(async () => {
-  for (const d of dirs.splice(0))
-    await fs.rm(d, { recursive: true, force: true });
-});
+  // Remove worktrees before their repositories, allowing transient Windows locks to clear.
+  for (const d of dirs.splice(0).reverse())
+    await fs.rm(d, {
+      recursive: true,
+      force: true,
+      maxRetries: 5,
+      retryDelay: 100,
+    });
+}, GIT_INTEGRATION_TIMEOUT);
 const call = (name: string, args: unknown, id = randomUUID()) => ({
   output: [
     {
@@ -474,10 +482,13 @@ describe("durable runtime", () => {
   });
 });
 
-describe("worker integration", () => {
+describe("worker integration", { timeout: GIT_INTEGRATION_TIMEOUT }, () => {
   async function repo() {
     const root = await temp();
     await git(root, ["init"]);
+    // Fixtures write LF bytes explicitly, independent of the runner's Git defaults.
+    await git(root, ["config", "core.autocrlf", "false"]);
+    await git(root, ["config", "core.eol", "lf"]);
     await fs.writeFile(path.join(root, "a.txt"), "base\n");
     await git(root, ["add", "."]);
     await git(root, [
@@ -777,7 +788,7 @@ describe("recovery and checkpoints", () => {
       async () => {},
     );
     expect(await fs.readFile(path.join(root, "a"), "utf8")).toBe("after");
-  });
+  }, GIT_INTEGRATION_TIMEOUT);
   it("enforcement hooks fail closed while advisory hooks cannot deny", async () => {
     const root = await temp();
     const command =
