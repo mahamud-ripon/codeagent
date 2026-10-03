@@ -344,7 +344,7 @@ async function runOneTask(
       maxIterations,
       signal,
     });
-    for await (const envelope of run.events()) {
+    for await (const envelope of run.events(0, signal)) {
       if (envelope.agentId !== "coordinator") continue;
       const event = {
         ...envelope.data,

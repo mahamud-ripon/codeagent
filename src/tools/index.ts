@@ -903,6 +903,8 @@ export const toolRegistry = new Map<
               ? `${result.output}\nUse bash_output with job_id ${result.jobId} to poll.`
               : result.output;
           }
+          if (mode === "docker")
+            throw new Error("Docker sandbox requires a DockerCommandRunner; host execution refused.");
           if (a.background)
             throw new Error(
               "The configured command runner does not support background execution.",

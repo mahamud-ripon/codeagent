@@ -44,7 +44,11 @@ export async function isGit(root: string): Promise<boolean> {
     return false;
   }
 }
-export async function workspaceState(root: string): Promise<WorkspaceState> {
+export type WorkspaceHashCache = Map<string, { fingerprint: string; hash: string }>;
+export async function workspaceState(
+  root: string,
+  cache?: WorkspaceHashCache,
+): Promise<WorkspaceState> {
   let names: string[];
   if (await isGit(root))
     names = [
@@ -72,7 +76,14 @@ export async function workspaceState(root: string): Promise<WorkspaceState> {
   for (const name of names.sort()) {
     if (name.split(/[\\/]/).some((p) => EXCLUDED.has(p))) continue;
     try {
-      const stat = await fs.lstat(path.join(root, name));
+      const file = path.resolve(root, name);
+      const stat = await fs.lstat(file, { bigint: true });
+      const fingerprint = [stat.dev, stat.ino, stat.mode, stat.size, stat.mtimeNs, stat.ctimeNs].join(":");
+      const cached = cache?.get(file);
+      if (cached?.fingerprint === fingerprint) {
+        files[name] = cached.hash;
+        continue;
+      }
       const bytes = stat.isSymbolicLink()
         ? Buffer.from(await fs.readlink(path.join(root, name)))
         : await fs.readFile(path.join(root, name));
@@ -80,9 +91,14 @@ export async function workspaceState(root: string): Promise<WorkspaceState> {
         .update(String(stat.mode))
         .update(bytes)
         .digest("hex");
+      cache?.set(file, { fingerprint, hash: files[name]! });
     } catch (e) {
       if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
     }
+  }
+  if (cache) {
+    const present = new Set(Object.keys(files).map((name) => path.resolve(root, name)));
+    for (const file of cache.keys()) if (!present.has(file)) cache.delete(file);
   }
   return {
     files,
@@ -234,6 +250,7 @@ export async function applyPatch(
     p.stderr.on("data", (d) => (err += String(d)));
     p.on("error", reject);
     p.on("close", (c) => (c === 0 ? resolve() : reject(new Error(err))));
+    p.stdin.on("error", reject);
     p.stdin.end(patch);
   });
 }

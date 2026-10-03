@@ -88,6 +88,7 @@ export function atomicJson(file: string, value: unknown): void {
 }
 /** Owned by one supervisor. The supervisor lock prevents multiple writers. */
 export class JournalStore implements SessionStore {
+  private lastSync = new Map<string, number>();
   private cache = new Map<
     string,
     {
@@ -164,7 +165,14 @@ export class JournalStore implements SessionStore {
     const fd = fs.openSync(file, "a", 0o600);
     try {
       fs.writeSync(fd, JSON.stringify(e) + "\n");
-      fs.fsyncSync(fd);
+      // Streaming deltas group-commit at most every 100ms. Every other event
+      // durably commits itself and all preceding deltas, including the final tail.
+      const delta = ["text_delta", "thinking_delta", "tool_output_delta"].includes(e.type);
+      const now = Date.now();
+      if (!delta || now - (this.lastSync.get(event.sessionId) ?? 0) >= 100) {
+        fs.fsyncSync(fd);
+        this.lastSync.set(event.sessionId, now);
+      }
     } finally {
       fs.closeSync(fd);
     }
@@ -221,9 +229,17 @@ export class JournalStore implements SessionStore {
   list(): SessionSnapshot[] {
     const dir = path.join(this.root, "sessions");
     if (!fs.existsSync(dir)) return [];
-    return fs
-      .readdirSync(dir)
-      .map((id) => this.load(id))
-      .filter((s): s is SessionSnapshot => !!s);
+    const snapshots: SessionSnapshot[] = [];
+    for (const id of fs.readdirSync(dir)) {
+      try {
+        safeId(id);
+        const snapshot = this.load(id);
+        if (snapshot) snapshots.push(snapshot);
+        else console.warn(`Skipping session ${JSON.stringify(id)}: missing snapshot`);
+      } catch (error) {
+        console.warn(`Skipping session ${JSON.stringify(id)}: ${String(error)}`);
+      }
+    }
+    return snapshots;
   }
 }

@@ -21,6 +21,7 @@ export class RuntimeClient {
     ) as { token: string; endpoint: string };
     return new Promise((resolve, reject) => {
       const socket = net.createConnection(connection.endpoint);
+      socket.setEncoding("utf8");
       let data = "";
       let settled = false;
       const done = (error?: Error, value?: T) => {
@@ -54,7 +55,7 @@ export class RuntimeClient {
         ),
       );
       socket.on("data", (chunk) => {
-        data += String(chunk);
+        data += chunk;
         if (data.length > 64 * 1024 * 1024) {
           done(new Error("IPC response too large"));
           return;

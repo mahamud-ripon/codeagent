@@ -116,6 +116,7 @@ export function runSpawn(
     const proc = spawn(shell, shellArgs, { ...spawnOpts, detached: !isWin });
     proc.once("close", () => opts.onExit?.());
     job.proc = proc;
+    proc.stdin?.on("error", () => {});
     proc.stdin?.end(opts.stdin);
     const timer = setTimeout(() => killTree(proc), timeoutMs);
     proc.once("close", () => clearTimeout(timer));
@@ -155,6 +156,7 @@ export function runSpawn(
 
   return new Promise((resolve, reject) => {
     const proc = spawn(shell, shellArgs, { ...spawnOpts, detached: !isWin });
+    proc.stdin?.on("error", () => {});
     proc.stdin?.end(opts.stdin);
     proc.once("close", () => opts.onExit?.());
     let output = "";

@@ -160,7 +160,8 @@ export function loadHooksSettings(
 
 /**
  * SF-7 wiring: sandbox config (mode/image/network/mounts) from settings.
- * Last-file-wins per key; env SANDBOX_IMAGE is the image fallback.
+ * Last-file-wins for mode/image; network/mounts are user-only.
+ * Env SANDBOX_IMAGE is the image fallback.
  */
 export function loadSandboxSettings(
   repoRoot: string,
@@ -190,8 +191,10 @@ export function loadSandboxSettings(
     if (sb.mode === "local" || sb.mode === "docker") merged.mode = sb.mode;
     if (typeof sb.image === "string" && sb.image.trim())
       merged.image = sb.image.trim();
-    if (typeof sb.network === "boolean") merged.network = sb.network;
-    if (Array.isArray(sb.mounts)) {
+    // Only user settings may grant network access or mount host paths.
+    if (file === files[0] && typeof sb.network === "boolean")
+      merged.network = sb.network;
+    if (file === files[0] && Array.isArray(sb.mounts)) {
       merged.mounts = (sb.mounts as unknown[]).filter(
         (m): m is string => typeof m === "string",
       );

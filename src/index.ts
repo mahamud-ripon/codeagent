@@ -91,9 +91,9 @@ Options:
   --attach <session-id>   Reconnect to a durable run
   --acp                   Start the ACP stdio bridge (IDE integration)
   mcp <add|list|remove>   Manage MCP servers (see /mcp in REPL)
-  -r, --resume [id]       Resume latest session (or specified session ID / index)
+  -r, --resume [id]       Resume latest supervisor session (or ID); import legacy IDs with import-session first
   -c, --continue [id]       Alias for --resume (continue where you left off)
-  --sessions              List saved sessions for this repository and exit
+  --sessions              List supervisor sessions and exit
   -h, --help              Show this help
 
 REPL slash commands:

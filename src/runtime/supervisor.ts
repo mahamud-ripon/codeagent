@@ -10,6 +10,7 @@ import {
 } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { z } from "zod";
+import { RuntimeClient } from "./client.js";
 import { AgentRuntime, type RuntimeOptions } from "./runtime.js";
 import { JournalStore, atomicJson, runtimeHome } from "./store.js";
 import { PermissionManager } from "../agent/permissions.js";
@@ -556,11 +557,20 @@ export async function startSupervisor(
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== "EEXIST") throw e;
     const pid = Number(fs.readFileSync(lock, "utf8"));
-    let alive = true;
-    try {
-      process.kill(pid, 0);
-    } catch (err) {
-      alive = (err as NodeJS.ErrnoException).code !== "ESRCH";
+    let alive = Number.isSafeInteger(pid) && pid > 0 && pid !== process.pid;
+    if (alive) {
+      try {
+        process.kill(pid, 0);
+      } catch (err) {
+        alive = (err as NodeJS.ErrnoException).code === "EPERM";
+      }
+    }
+    if (alive) {
+      try {
+        await new RuntimeClient(root).request("initialize", {}, AbortSignal.timeout(1000));
+      } catch {
+        alive = false;
+      }
     }
     if (alive) throw new Error("Supervisor already running");
     fs.unlinkSync(lock);

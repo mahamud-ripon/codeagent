@@ -289,7 +289,9 @@ export class AgentRuntime {
         previousIntent = classifyIntent(message.text, previousIntent);
       }
     }
-    this.intent = classifyIntent(userRequest, previousIntent);
+    this.intent = (this.options.depth ?? 0) >= 1
+      ? this.options.role === "coding" ? "task" : "inquiry"
+      : classifyIntent(userRequest, previousIntent);
     this.controller = new AbortController();
     if (opts?.signal?.aborted) this.controller.abort();
     else
@@ -607,8 +609,27 @@ export class AgentRuntime {
         { signature: string; output: string }
       >();
       const intendedCalls = new Map<string, string>();
-      for (const event of this.store?.events(this.sessionId) ?? []) {
-        if (event.agentId !== this.agentId) continue;
+      const recoveryEvents = this.options.recoveryRunId
+        ? this.store?.events(this.sessionId) ?? []
+        : [];
+      const lineage = new Set([this.options.recoveryRunId]);
+      // Follow transitive origins, including journals whose origin events are out of order.
+      let expanded = true;
+      while (expanded) {
+        expanded = false;
+        for (const event of recoveryEvents) {
+          if (
+            event.type === "runtime_origin" &&
+            lineage.has(String(event.data.origin)) &&
+            !lineage.has(event.runId)
+          ) {
+            lineage.add(event.runId);
+            expanded = true;
+          }
+        }
+      }
+      for (const event of recoveryEvents) {
+        if (event.agentId !== this.agentId || !lineage.has(event.runId)) continue;
         if (event.type === "tool_intent")
           intendedCalls.set(
             event.correlationId,

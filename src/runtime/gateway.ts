@@ -8,7 +8,7 @@ import {
   type ToolExecutionContext,
 } from "../tools/index.js";
 import { Semaphore } from "./tasks.js";
-import { workspaceState } from "./workspace.js";
+import { workspaceState, type WorkspaceHashCache } from "./workspace.js";
 import { isSecretPath } from "../repo/ignore.js";
 import { resolveInsideRepo } from "../utils/paths.js";
 import type { HookConfig, HookName } from "../agent/hooks.js";
@@ -19,6 +19,8 @@ export type Emit = (
 ) => void;
 const locks = new Map<string, Semaphore>();
 export class ToolGateway {
+  private workspaceHashes: WorkspaceHashCache = new Map();
+  private hookCommand = false;
   constructor(
     public root: string,
     public permissions: PermissionManager,
@@ -45,6 +47,7 @@ export class ToolGateway {
       this.context.planModeManager?.isActive();
     if (
       readOnly &&
+      !(this.hookCommand && name === "run_command") &&
       (def?.effect === "write" ||
         def?.effect === "command" ||
         def?.effect === "external" ||
@@ -98,15 +101,17 @@ export class ToolGateway {
       if (!this.permissions.checkRead(relativePath))
         throw new Error(`Read permission denied: ${relativePath}`);
     }
-    if (
-      def?.effect === "write" &&
-      typeof args.path === "string" &&
-      !(await this.permissions.checkEdit(
-        args.path,
+    if (def?.effect === "write" && typeof args.path === "string") {
+      const relativePath = path
+        .relative(this.root, resolveInsideRepo(this.root, args.path))
+        .split(path.sep)
+        .join("/") || ".";
+      if (!(await this.permissions.checkEdit(
+        relativePath,
         `${name}: ${JSON.stringify(args)}`,
-      ))
-    )
-      throw new Error(`Edit permission denied: ${args.path}`);
+      )))
+        throw new Error(`Edit permission denied: ${relativePath}`);
+    }
     if (
       (name === "run_command" || name === "verify") &&
       !(await this.permissions.checkCommand(String(args.command ?? "")))
@@ -149,7 +154,7 @@ export class ToolGateway {
       const before =
         def?.concurrency === "shared"
           ? undefined
-          : await workspaceState(this.root);
+          : await workspaceState(this.root, this.workspaceHashes);
       this.emit(
         "tool_intent",
         {
@@ -169,7 +174,9 @@ export class ToolGateway {
             this.permissions.checkRead(file) && !isSecretPath(file),
           readDenyGlobs: this.permissions.readDenyGlobs(),
         });
-        const after = before ? await workspaceState(this.root) : undefined;
+        const after = before
+          ? await workspaceState(this.root, this.workspaceHashes)
+          : undefined;
         this.emit(
           "tool_result",
           {
@@ -241,11 +248,14 @@ export class ToolGateway {
           {
             ...this.context,
             hooks: undefined,
+            planModeManager: undefined,
             commandStdin: JSON.stringify({ hook: name, ...payload }),
           },
           this.emit,
-          this.allowed,
         );
+        // Configured hooks retain command permissions but are outside agent tool/plan restrictions.
+        gateway.hookCommand = true;
+        gateway.workspaceHashes = this.workspaceHashes;
         const output = await gateway.execute(
           "run_command",
           {
