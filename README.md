@@ -20,7 +20,7 @@ task -> shadow checkpoint -> intent check (regex + fast-model second opinion) ->
 - 🤖 **Subagents + parallel fan-out**: read-only `run_subagent` (`explore`/`plan`/`reviewer`/custom `.codeagent/agents/*.md` with `tools`/`model` enforcement) plus model-facing `run_subagents` (2–5 parallel, order-preserving).
 - 🚀 **Streaming execution**: true SSE providers (Responses/Anthropic/Gemini) stream `text_delta`/`thinking_delta`/`usage` by default; `run_command` uses `spawn` (tree kill, timeout, `bash_output`/`kill_shell`, `tool_output_delta`); batching via `StreamingToolExecutor`.
 - 🧩 **Extensible**: MCP (`mcp__server__tool`, `/mcp`, `codeagent mcp add/list/remove`, per-tool `MCP(server:tool` rules), custom commands (`.codeagent/commands/*.md` with `$ARGUMENTS`/`@file`/`!cmd`), hooks (`SessionStart/UserPromptSubmit/PreToolUse/PostToolUse/Stop/PreCompact`), skills (`SKILL.md` descriptions in context), plugins (`codeagent plugin install/list/remove`).
-- 🖥️ **Two UIs**: legacy readline (default) + `--ui=next` streaming layer (markdown, diff preview, status line, fuzzy pickers, queue, themes, vim mode + `~/.codeagent/keybindings.json`). `Shift+Tab` cycles permission modes.
+- 🖥️ **Two UIs**: legacy readline (default) + opt-in `--ui=next` full-screen terminal with a scrollable transcript, multiline editor, streamed tool output, queued prompts, permission dialogs, and session resume. `Shift+Tab` cycles permission modes. See [terminal UI controls](docs/ui-next.md).
 
 ---
 

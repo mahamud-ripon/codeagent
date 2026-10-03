@@ -68,7 +68,7 @@ Options:
   --allowedTools <rules>  Comma-separated allow rules, e.g. Bash(npm test:*),Edit(src/**)
   --print                 Headless: run one task and print the result
   --output-format <fmt>   text (default), json, or stream-json
-  --ui <mode>             Terminal UI: legacy (default) or next (streaming)
+  --ui <mode>             Terminal UI: legacy (default) or next (full-screen)
   --acp                   Start the ACP stdio bridge (IDE integration)
   mcp <add|list|remove>   Manage MCP servers (see /mcp in REPL)
   -r, --resume [id]       Resume latest session (or specified session ID / index)

@@ -65,6 +65,8 @@ export interface AgentOptions extends AgentConfig {
   provider?: string;
   baseURL?: string;
   onEvent?: (event: AgentEvent) => void;
+  /** Interactive clarification supplied by a terminal or embedding UI. */
+  askUser?: (question: string) => Promise<string>;
   contextWindow?: number;
   maxTotalTokens?: number;
   maxCostUsd?: number;
@@ -1224,6 +1226,7 @@ export class Agent {
             responder: this.responder,
             providerOverrides: this.providerOverrides,
             planApprover: this.options.planApprover,
+            askUser: this.options.askUser,
             hooks: this.options.hooks,
             commandRunner: this.options.commandRunner,
             sandboxMode: this.options.sandboxMode,

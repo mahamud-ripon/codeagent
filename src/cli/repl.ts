@@ -34,8 +34,10 @@ import { ensurePersistentContainer, getSandboxMode, removePersistentContainer, s
 import { commandNames, findCommand } from "./commandRegistry.js";
 import { transitionForCommand } from "./sessionController.js";
 import { collapseLargePaste, historySearch, shouldSubmitOnEnter } from "./inputHandler.js";
-import { MessageQueue, renderNextEvent, renderStatusLine } from "../tui/next.js";
-import { createReporterAdapter } from "./ui/reporterAdapter.js";
+import { renderStatusLine } from "../tui/next.js";
+import type { AgentReporter } from "./ui/reporter.js";
+import type { AgentEvent } from "../llm/events.js";
+import type { AgentRunResult } from "../agent/types.js";
 import {
   appendSessionTurn,
   createSession,
@@ -98,7 +100,7 @@ export interface SessionConfig {
   /** Original repository root, captured before switching into an isolated worktree. */
   mainRepoRoot?: string;
   /** Reference to the reporter of the currently running task (for live view toggles). */
-  activeReporter?: ConsoleAgentReporter;
+  activeReporter?: AgentReporter & { setTodosExpanded?: (expanded: boolean) => void };
   /** Whether the sticky todo list renders expanded (true) or as a compact one-liner (false). */
   todosExpanded?: boolean;
   /** Storage directory override for saved sessions (defaults to the real home). */
@@ -351,26 +353,36 @@ async function resolveAutoTitle(task: string, summarizer?: Responder): Promise<s
   }
 }
 
-async function runTask(
+export interface TaskPresentation {
+  reporter: AgentReporter;
+  onEvent: (event: AgentEvent) => void;
+  log: (text: string) => void;
+  onResult: (result: AgentRunResult, durationMs: number) => void;
+  askUser?: (question: string) => Promise<string>;
+}
+
+export async function runTask(
   session: SessionConfig,
   task: string,
   signal: AbortSignal,
   turn?: { historyStart: number; checkpointId?: string; checkpointHash?: string },
+  presentation?: TaskPresentation,
 ): Promise<void> {
+  const log = presentation?.log ?? ((text: string) => console.log(text));
   // Heal keys saved before auto-detect existed (or pasted into .env by hand).
   for (const notice of ensureEndpointForKey({
     provider: session.provider,
     baseURL: session.baseURL,
     model: session.model,
   })) {
-    console.log(pc.yellow(notice));
+    log(pc.yellow(notice));
   }
   let provider;
   try {
     provider = createProviderFromEnv(process.env, sessionOverrides(session));
   } catch (error) {
     if (error instanceof MissingApiKeyError) {
-      console.error(pc.yellow(`\n${error.message}\n`));
+      log(pc.yellow(`\n${error.message}\n`));
       return;
     }
     throw error;
@@ -415,32 +427,18 @@ async function runTask(
   void loadHookConfig;
   const settingsHooks = loadHooksSettings(session.repoRoot);
 
-  const isAuto = session.permissions?.isAutoApprove() ?? session.autoApprove ?? false;
-  const reporter = new ConsoleAgentReporter(session.repoRoot, session.autoExpandThought, session.todoManager?.getTodos());
-  reporter.setTodosExpanded(session.todosExpanded ?? true);
-  reporter.setIsAutoMode?.(isAuto);
-  reporter.startTask();
+  let reporter: AgentReporter;
+  if (presentation) {
+    reporter = presentation.reporter;
+  } else {
+    const consoleReporter = new ConsoleAgentReporter(session.repoRoot, session.autoExpandThought, session.todoManager?.getTodos());
+    consoleReporter.setTodosExpanded(session.todosExpanded ?? true);
+    consoleReporter.setIsAutoMode(session.permissions?.isAutoApprove() ?? session.autoApprove ?? false);
+    consoleReporter.startTask();
+    reporter = consoleReporter;
+  }
   session.activeReporter = reporter;
-  // F-12: --ui=next streams AgentEvents through the zero-dep renderer
-  // in addition to the legacy reporter (parity path behind the flag).
-  const useNextUi = session.ui === "next";
-  const nextQueue = new MessageQueue();
-  void nextQueue;
-  let nextState = { codeFence: false as boolean };
-  const onEvent = useNextUi
-    ? (event: import("../llm/events.js").AgentEvent) => {
-        if ("respond" in (event as Record<string, unknown>)) return;
-        const rendered = renderNextEvent(event, nextState);
-        nextState = { codeFence: rendered.codeFence };
-        for (const line of rendered.lines) console.log(line);
-        // Keep the legacy reporter in sync via the ARCH-1 adapter.
-        try {
-          createReporterAdapter(reporter as never)(event);
-        } catch {
-          // adapter is best-effort
-        }
-      }
-    : undefined;
+  const onEvent = presentation?.onEvent;
   // SF-7: ensure a persistent container for docker-mode sessions (best-effort).
   try {
     const sb = sandboxConfigFromSettings({ sandbox: loadSandboxSettings(session.repoRoot) });
@@ -459,6 +457,7 @@ async function runTask(
     systemPrompt,
     permissions: session.permissions,
     reporter,
+    verbose: !presentation,
     todoManager: session.todoManager,
     planModeManager: session.planModeManager,
     fileStateCache: session.fileStateCache,
@@ -473,6 +472,7 @@ async function runTask(
     smallModel: modelSettings.smallModel,
     hooks: settingsHooks,
     onEvent,
+    askUser: presentation?.askUser,
   });
   try {
     const taskStartedAt = Date.now();
@@ -576,35 +576,43 @@ async function runTask(
       }
     }
 
+    if (presentation) {
+      presentation.onResult(result, Date.now() - taskStartedAt);
+      return;
+    }
+
     // Rich formatted assistant response
-    console.log("");
-    console.log(formatMarkdown(result.finalMessage));
-    console.log("");
+    log("");
+    log(formatMarkdown(result.finalMessage));
+    log("");
 
     // Point 7: Jump to bottom badge if response is long
     if (result.finalMessage.split("\n").length > 15) {
-      console.log(renderJumpToBottomBadge());
-      console.log("");
+      log(renderJumpToBottomBadge());
+      log("");
     }
 
     // Point 6: Claude Code completion line: * Cooked for 2m 10s · done 10:13 PM
     const durationMs = Date.now() - taskStartedAt;
-    console.log(formatTurnCompletionLine(durationMs));
-    console.log("");
+    log(formatTurnCompletionLine(durationMs));
+    log("");
 
     if (session.todoManager) {
       const activeTodos = session.todoManager.getTodos();
       if (activeTodos.length > 0) {
-        console.log(`${renderTodoList(activeTodos)}\n`);
+        log(`${renderTodoList(activeTodos)}\n`);
       }
     }
   } catch (error) {
     reporter.stop();
     if (signal.aborted) {
-      console.log(pc.yellow("\nRun cancelled."));
+      log(pc.yellow("\nRun cancelled."));
       return;
     }
-    console.error(pc.red(`\nAgent failed: ${error instanceof Error ? error.message : error}`));
+    log(pc.red(`\nAgent failed: ${error instanceof Error ? error.message : error}`));
+  } finally {
+    reporter.stop();
+    session.activeReporter = undefined;
   }
 }
 
@@ -808,6 +816,10 @@ export function printShortcuts(): void {
 }
 
 export async function startRepl(initial: SessionConfig): Promise<void> {
+  if (initial.ui === "next" && process.stdin.isTTY && process.stdout.isTTY && process.env.TERM !== "dumb") {
+    const { startNextRepl } = await import("../tui/session.js");
+    return startNextRepl(initial);
+  }
   const session: SessionConfig = { ...initial };
   if (!session.activeSession) {
     session.activeSession = createSession(session.repoRoot, {
@@ -964,7 +976,7 @@ export async function startRepl(initial: SessionConfig): Promise<void> {
     if (key && key.ctrl && key.name === "t") {
       session.todosExpanded = !(session.todosExpanded ?? true);
       if (running) {
-        session.activeReporter?.setTodosExpanded(session.todosExpanded);
+        session.activeReporter?.setTodosExpanded?.(session.todosExpanded);
         return;
       }
       readline.cursorTo(process.stdout, 0);
