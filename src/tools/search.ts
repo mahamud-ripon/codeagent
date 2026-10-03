@@ -32,7 +32,12 @@ export function resolveRgBinary(): string {
   return cachedRg;
 }
 
-export async function search(repoRoot: string, query: string, hygieneOn = false): Promise<string> {
+export async function search(
+  repoRoot: string,
+  query: string,
+  hygieneOn = false,
+  denyGlobs: string[] = [],
+): Promise<string> {
   if (!query || !query.trim()) {
     throw new Error("Search query cannot be empty");
   }
@@ -45,6 +50,7 @@ export async function search(repoRoot: string, query: string, hygieneOn = false)
   for (const glob of ripgrepIgnoreGlobs(hygieneOn)) {
     args.push("--glob", glob);
   }
+  for (const pattern of denyGlobs) args.push("--iglob", `!${pattern}`);
   args.push("--", query, ".");
 
   try {
@@ -57,17 +63,25 @@ export async function search(repoRoot: string, query: string, hygieneOn = false)
     if (!out) return "No matches found.";
     return truncate(out, TRUNCATION_BUDGETS.search);
   } catch (error: unknown) {
-    const err = error as { code?: number | string | null; stdout?: string; message?: string };
+    const err = error as {
+      code?: number | string | null;
+      stdout?: string;
+      message?: string;
+    };
     // rg exits 1 when there are zero matches — that is a success for us.
     if (err.code === 1) return "No matches found.";
-    if (err.code === "ENOENT" || /not recognized|not found/i.test(String(err.message))) {
+    if (
+      err.code === "ENOENT" ||
+      /not recognized|not found/i.test(String(err.message))
+    ) {
       throw new Error(
         "ripgrep (rg) binary not found. Install ripgrep or set RG_PATH to an rg executable.",
       );
     }
-    const partial = typeof err.stdout === "string" && err.stdout.trim()
-      ? truncate(err.stdout.trim(), TRUNCATION_BUDGETS.search)
-      : null;
+    const partial =
+      typeof err.stdout === "string" && err.stdout.trim()
+        ? truncate(err.stdout.trim(), TRUNCATION_BUDGETS.search)
+        : null;
     if (partial) return partial;
     throw new Error(`Search failed: ${err.message ?? String(error)}`);
   }
@@ -75,6 +89,7 @@ export async function search(repoRoot: string, query: string, hygieneOn = false)
 
 export interface GrepOptions {
   query: string;
+  denyGlobs?: string[];
   path?: string;
   glob?: string;
   caseSensitive?: boolean;
@@ -85,10 +100,14 @@ export interface GrepOptions {
 }
 
 /** ripgrep with path, glob, case, context, and output mode. */
-export async function grep(repoRoot: string, options: GrepOptions & { hygieneOn?: boolean }): Promise<string> {
+export async function grep(
+  repoRoot: string,
+  options: GrepOptions & { hygieneOn?: boolean },
+): Promise<string> {
   const query = options.query?.trim() ?? "";
   if (!query) throw new Error("grep query cannot be empty");
-  if (query.length > 500) throw new Error("grep query too long (500 char limit)");
+  if (query.length > 500)
+    throw new Error("grep query too long (500 char limit)");
 
   const rg = resolveRgBinary();
   const args = ["--line-number", "--hidden"];
@@ -97,14 +116,24 @@ export async function grep(repoRoot: string, options: GrepOptions & { hygieneOn?
   else if (mode === "count") args.push("--count");
   else args.push("--no-heading");
   if (options.caseSensitive === false) args.push("-i");
-  if (options.context && options.context > 0) args.push("-C", String(Math.min(options.context, 20)));
+  if (options.context && options.context > 0)
+    args.push("-C", String(Math.min(options.context, 20)));
   else {
-    if (options.before && options.before > 0) args.push("-B", String(Math.min(options.before, 20)));
-    if (options.after && options.after > 0) args.push("-A", String(Math.min(options.after, 20)));
+    if (options.before && options.before > 0)
+      args.push("-B", String(Math.min(options.before, 20)));
+    if (options.after && options.after > 0)
+      args.push("-A", String(Math.min(options.after, 20)));
   }
   if (options.glob) args.push("--glob", options.glob);
-  for (const glob of ripgrepIgnoreGlobs(options.hygieneOn ?? false)) args.push("--glob", glob);
-  args.push("--", query, options.path && options.path.trim() ? options.path : ".");
+  for (const glob of ripgrepIgnoreGlobs(options.hygieneOn ?? false))
+    args.push("--glob", glob);
+  for (const pattern of options.denyGlobs ?? [])
+    args.push("--iglob", `!${pattern}`);
+  args.push(
+    "--",
+    query,
+    options.path && options.path.trim() ? options.path : ".",
+  );
 
   try {
     const { stdout } = await execFileAsync(rg, args, {
@@ -116,12 +145,24 @@ export async function grep(repoRoot: string, options: GrepOptions & { hygieneOn?
     if (!out) return mode === "count" ? "0" : "No matches found.";
     return truncate(out, TRUNCATION_BUDGETS.search);
   } catch (error: unknown) {
-    const err = error as { code?: number | string | null; stdout?: string; message?: string };
+    const err = error as {
+      code?: number | string | null;
+      stdout?: string;
+      message?: string;
+    };
     if (err.code === 1) return mode === "count" ? "0" : "No matches found.";
-    if (err.code === "ENOENT" || /not recognized|not found/i.test(String(err.message))) {
-      throw new Error("ripgrep (rg) binary not found. Install ripgrep or set RG_PATH to an rg executable.");
+    if (
+      err.code === "ENOENT" ||
+      /not recognized|not found/i.test(String(err.message))
+    ) {
+      throw new Error(
+        "ripgrep (rg) binary not found. Install ripgrep or set RG_PATH to an rg executable.",
+      );
     }
-    const partial = typeof err.stdout === "string" && err.stdout.trim() ? truncate(err.stdout.trim(), TRUNCATION_BUDGETS.search) : null;
+    const partial =
+      typeof err.stdout === "string" && err.stdout.trim()
+        ? truncate(err.stdout.trim(), TRUNCATION_BUDGETS.search)
+        : null;
     if (partial) return partial;
     throw new Error(`grep failed: ${err.message ?? String(error)}`);
   }

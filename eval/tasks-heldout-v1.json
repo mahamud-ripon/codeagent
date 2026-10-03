@@ -1,0 +1,632 @@
+[
+  {
+    "id": "heldout-stable-unique",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Return unique records by id, preserving the first record and input order. Do not mutate the input. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-stable-unique\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input=[{id:2,v:\"first\"},{id:1},{id:2,v:\"last\"}];const before=structuredClone(input);assert.deepEqual(transform(input),[{id:2,v:\"first\"},{id:1}]);assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-group-zero",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Group records by key into an object of arrays. Include empty-string and numeric-zero keys. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-group-zero\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input=[{key:0,v:1},{key:\"\",v:2},{key:0,v:3}];const before=structuredClone(input);assert.deepEqual(transform(input),{\"0\":[{key:0,v:1},{key:0,v:3}],\"\":[{key:\"\",v:2}]});assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-stable-sort",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Sort records by score ascending. Missing scores belong last; ties preserve input order. Return a copy. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-stable-sort\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input=[{id:\"a\",score:2},{id:\"b\"},{id:\"c\",score:0},{id:\"d\",score:2}];const before=structuredClone(input);assert.deepEqual(transform(input),[{id:\"c\",score:0},{id:\"a\",score:2},{id:\"d\",score:2},{id:\"b\"}]);assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-merge-defined",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Merge the object array left to right. Undefined values do not overwrite existing values; null does. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-merge-defined\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input=[{a:1,b:2},{a:undefined,b:null,c:0}];const before=structuredClone(input);assert.deepEqual(transform(input),{a:1,b:null,c:0});assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-flatten-nested",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Flatten nested arrays recursively, preserving falsy values and leaving objects intact. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-flatten-nested\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input=[0,[false,[\"\",null]],{a:1}];const before=structuredClone(input);assert.deepEqual(transform(input),[0,false,\"\",null,{a:1}]);assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-count-words",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Count case-insensitive words separated by whitespace, ignoring empty tokens; return an object. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-count-words\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input=\" Alpha  beta\\nalpha BETA gamma \";const before=structuredClone(input);assert.deepEqual(transform(input),{alpha:2,beta:2,gamma:1});assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-parse-query",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Parse a query string into an object of string arrays. Decode percent escapes and plus as space; preserve repeated and empty values. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-parse-query\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input=\"?q=hello+world&q=a%2Bb&empty=\";const before=structuredClone(input);assert.deepEqual(transform(input),{q:[\"hello world\",\"a+b\"],empty:[\"\"]});assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-range-inclusive",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Given {start,end,step}, return an inclusive arithmetic range. Support negative steps; return [] when step cannot reach end. Reject zero step. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-range-inclusive\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input={start:5,end:-1,step:-2};const before=structuredClone(input);assert.deepEqual(transform(input),[5,3,1,-1]);assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-deep-get",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Given {object,path,fallback}, traverse an array of keys. Return fallback only when a value is undefined; preserve null, false and zero. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-deep-get\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input={object:{a:[{b:0}]},path:[\"a\",0,\"b\"],fallback:99};const before=structuredClone(input);assert.deepEqual(transform(input),0);assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-chunk-copy",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Given {items,size}, return consecutive chunks. Reject nonpositive or noninteger size and do not mutate the input. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-chunk-copy\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input={items:[1,2,3,4,5],size:2};const before=structuredClone(input);assert.deepEqual(transform(input),[[1,2],[3,4],[5]]);assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-interval-union",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Merge overlapping or touching [start,end] intervals, sorted by start, without mutating input. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-interval-union\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input=[[5,8],[1,3],[3,6],[10,11]];const before=structuredClone(input);assert.deepEqual(transform(input),[[1,8],[10,11]]);assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-transpose-ragged",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Transpose a ragged array of arrays, filling absent cells with null. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-transpose-ragged\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input=[[1,2,3],[4],[5,6]];const before=structuredClone(input);assert.deepEqual(transform(input),[[1,4,5],[2,null,6],[3,null,null]]);assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-partition-stable",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Given {items,threshold}, return [items below threshold, remaining items], preserving order. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-partition-stable\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input={items:[3,1,5,2,3],threshold:3};const before=structuredClone(input);assert.deepEqual(transform(input),[[1,2],[3,5,3]]);assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-sum-decimals",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Sum decimal currency strings exactly to cents and return a two-decimal string. Support negatives. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-sum-decimals\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input=[\"0.10\",\"0.20\",\"-0.05\",\"2.00\"];const before=structuredClone(input);assert.deepEqual(transform(input),\"2.25\");assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-normalize-slashes",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Normalize repeated forward slashes and dot segments in an absolute URL path; resolve .. without escaping root. Preserve a trailing slash. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-normalize-slashes\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input=\"/a//b/../c/./\";const before=structuredClone(input);assert.deepEqual(transform(input),\"/a/c/\");assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-csv-quote",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Serialize a row of string values as CSV. Quote commas, quotes, and newlines; double internal quotes. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-csv-quote\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input=[\"plain\", \"a,b\", \"say \\\"hi\\\"\", \"line\\nbreak\"];const before=structuredClone(input);assert.deepEqual(transform(input),\"plain,\\\"a,b\\\",\\\"say \\\"\\\"hi\\\"\\\"\\\",\\\"line\\nbreak\\\"\");assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-escape-html",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Escape &, <, >, double quote and apostrophe in a string for HTML text. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-escape-html\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input=\"<&>\\\"'\";const before=structuredClone(input);assert.deepEqual(transform(input),\"&lt;&amp;&gt;&quot;&#39;\");assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-zip-longest",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Zip two arrays into pairs, padding the shorter array with null. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-zip-longest\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input=[[0,false,2],[\"a\"]];const before=structuredClone(input);assert.deepEqual(transform(input),[[0,\"a\"],[false,null],[2,null]]);assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-histogram",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Count string occurrences using own properties only, including __proto__ and constructor keys. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-histogram\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input=[\"__proto__\",\"constructor\",\"__proto__\",\"x\"];const before=structuredClone(input);assert.deepEqual(transform(input),JSON.parse('{\"__proto__\":2,\"constructor\":1,\"x\":1}'));assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-rotate-array",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Given {items,offset}, rotate right, supporting negative and oversized offsets and empty arrays. Do not mutate input. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-rotate-array\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input={items:[1,2,3,4],offset:-1};const before=structuredClone(input);assert.deepEqual(transform(input),[2,3,4,1]);assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-intersection",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Return the unique intersection of two arrays in first-array order. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-intersection\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input=[[3,1,3,2],[2,3,3]];const before=structuredClone(input);assert.deepEqual(transform(input),[3,2]);assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-difference",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Return items from the first array not in the second, preserving order and duplicates. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-difference\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input=[[3,1,3,2,1],[3]];const before=structuredClone(input);assert.deepEqual(transform(input),[1,2,1]);assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-trim-object",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Trim string values of an object shallowly, preserving nonstrings and without mutating the original. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-trim-object\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input={a:\" x \",b:0,c:null,d:false};const before=structuredClone(input);assert.deepEqual(transform(input),{a:\"x\",b:0,c:null,d:false});assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-pick-own",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Given {object,keys}, copy only requested own properties that exist, including falsy values. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-pick-own\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input={object:{a:0,b:false,c:null},keys:[\"a\",\"b\",\"missing\"]};const before=structuredClone(input);assert.deepEqual(transform(input),{a:0,b:false});assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-set-path",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Given {object,path,value}, immutably set a nested object path while preserving sibling data. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-set-path\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input={object:{a:{b:1,c:2},d:3},path:[\"a\",\"b\"],value:0};const before=structuredClone(input);assert.deepEqual(transform(input),{a:{b:0,c:2},d:3});assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-parse-lines",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Parse newline-separated integers, skipping blank and comment lines beginning with #. Reject malformed numeric lines. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-parse-lines\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input=\"1\\r\\n # comment\\n-2\\n\\n0\\n\";const before=structuredClone(input);assert.deepEqual(transform(input),[1,-2,0]);assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-coalesce",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Return the first value that is neither null nor undefined; return null if none. Preserve zero and false. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-coalesce\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input=[null,undefined,false,0];const before=structuredClone(input);assert.deepEqual(transform(input),false);assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-unicode-reverse",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Reverse a string by Unicode code points without splitting surrogate pairs. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-unicode-reverse\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input=\"A😀B\";const before=structuredClone(input);assert.deepEqual(transform(input),\"B😀A\");assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-rle",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Run-length encode a string by Unicode code points into [character,count] pairs. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-rle\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input=\"aa😀😀b\";const before=structuredClone(input);assert.deepEqual(transform(input),[[\"a\",2],[\"😀\",2],[\"b\",1]]);assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  },
+  {
+    "id": "heldout-object-invert",
+    "bucket": "behavior",
+    "language": "js",
+    "prompt": "Invert an object into value-to-array-of-keys, preserving key enumeration order and avoiding prototype collisions. Implement transform in lib/transform.cjs. Preserve the public entrypoint export from index.cjs. Add focused tests and run them.",
+    "files": {
+      "lib/transform.cjs": "exports.transform = function transform(input) { throw new Error(\"Not implemented\"); };\n",
+      "index.cjs": "module.exports = require(\"./lib/transform.cjs\");\n",
+      "package.json": "{\"name\": \"heldout-object-invert\", \"private\": true, \"scripts\": {\"test\": \"node --test tests/*.test.cjs\"}}",
+      "tests/exports.test.cjs": "const {test}=require(\"node:test\");const assert=require(\"node:assert/strict\");test(\"public API\",()=>assert.equal(typeof require(\"../index.cjs\").transform,\"function\"));\n"
+    },
+    "expect": "transform",
+    "verify": {
+      "file": "__heldout.cjs",
+      "content": "const assert=require(\"node:assert/strict\");const {transform}=require(\"./index.cjs\");const input={a:\"x\",b:\"y\",c:\"x\"};const before=structuredClone(input);assert.deepEqual(transform(input),{x:[\"a\",\"c\"],y:[\"b\"]});assert.deepEqual(input,before,\"input mutation\");console.log(\"HELDOUT_OK\");\n",
+      "run": "node __heldout.cjs",
+      "expectOut": "HELDOUT_OK"
+    },
+    "maxIterations": 30,
+    "timeoutSec": 600
+  }
+]

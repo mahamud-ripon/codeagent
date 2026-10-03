@@ -1,4 +1,4 @@
-# CodeAgent VS Code Extension (HL-5)
+# CodeAgent VS Code Extension (1.0)
 
 Official Visual Studio Code extension for **CodeAgent** — the autonomous coding agent.
 Communicates directly with the `codeagent --acp` stdio bridge via the Agent Client Protocol (ACP).
@@ -38,14 +38,14 @@ npm install -g @mahamud-ripon/codeagent
 From the project root:
 
 ```bash
-code --install-extension extensions/vscode/codeagent-vscode-0.7.0.vsix
+code --install-extension extensions/vscode/codeagent-vscode-1.0.0.vsix
 ```
 
 Or in VS Code:
 1. Open the **Extensions** view (`Ctrl+Shift+X` / `Cmd+Shift+X`).
 2. Click the `...` menu in the top right.
 3. Select **Install from VSIX...**.
-4. Choose `extensions/vscode/codeagent-vscode-0.7.0.vsix`.
+4. Choose `extensions/vscode/codeagent-vscode-1.0.0.vsix`.
 
 ### Option 2: Package from Source
 
@@ -63,15 +63,19 @@ In your VS Code `settings.json`:
 ```json
 {
   "codeagent.cliPath": "codeagent",
-  "codeagent.autoApprove": true
+  "codeagent.autoApprove": false
 }
 ```
 
 * `codeagent.cliPath`: Custom path to your `codeagent` executable (default: `codeagent` on PATH).
-* `codeagent.autoApprove`: Auto-approve tool operations (default: `true`).
+* `codeagent.autoApprove`: Auto-approve tool operations (default: `false`).
 
 ---
 
 ## License
 
 MIT © Mahamud Ripon
+
+## Durable sessions
+
+Install the 1.0 CLI and extension together; the bridge negotiates protocol 1.0. The supervisor continues running when the bridge or editor closes. Use **CodeAgent: Attach Session** to reconnect; the most recent session ID is saved per workspace. **Detach Session** leaves the task running. **Steer Running Task** adds instructions, and **Inspect Tasks, Workers, Jobs and Verification** displays durable state in the output channel. Approval dialogs reference pending action IDs. `/new` creates a fresh conversation after the current task finishes.

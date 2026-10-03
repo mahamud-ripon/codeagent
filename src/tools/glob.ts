@@ -10,11 +10,18 @@ function matchGlob(relative: string, pattern: string): boolean {
     .replace(/\*\*/g, "\u0000")
     .replace(/\*/g, "[^/]*")
     .replace(/\u0000/g, ".*");
-  return new RegExp(`^${source}$`, "i").test(normalized) || new RegExp(source, "i").test(normalized);
+  return (
+    new RegExp(`^${source}$`, "i").test(normalized) ||
+    new RegExp(source, "i").test(normalized)
+  );
 }
 
 /** List repo files matching a glob. Ignores dependency and build directories. */
-export async function globFiles(repoRoot: string, pattern: string): Promise<string> {
+export async function globFiles(
+  repoRoot: string,
+  pattern: string,
+  readAllowed?: (file: string) => boolean,
+): Promise<string> {
   const query = pattern.trim();
   if (!query) throw new Error("glob pattern cannot be empty");
   const root = path.resolve(repoRoot);
@@ -35,7 +42,8 @@ export async function globFiles(repoRoot: string, pattern: string): Promise<stri
         await walk(full);
       } else if (entry.isFile()) {
         const rel = path.relative(root, full).split(path.sep).join("/");
-        if (matchGlob(rel, query)) matches.push(rel);
+        if (matchGlob(rel, query) && (!readAllowed || readAllowed(rel)))
+          matches.push(rel);
       }
       if (matches.length >= 2000) return;
     }

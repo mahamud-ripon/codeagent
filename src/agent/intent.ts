@@ -108,7 +108,7 @@ export function fastGreetingResponse(prompt: string): string | null {
   return null;
 }
 
-export function classifyIntent(prompt: string): AgentIntent {
+export function classifyIntent(prompt: string, previousIntent?: AgentIntent): AgentIntent {
   const trimmed = prompt.trim();
   if (!trimmed) return "conversational";
 
@@ -117,6 +117,13 @@ export function classifyIntent(prompt: string): AgentIntent {
     if (pattern.test(trimmed)) {
       return "conversational";
     }
+  }
+
+  // Recognize the subject even when a short dialogue request has a typo.
+  // Explicit file/code actions must still reach the task path.
+  if (!ACTION_VERBS.test(trimmed) && !CODE_FILE_EXTENSION.test(trimmed) &&
+      /\b(our|this)\s+(con?versation|chat|discussion|dialogue)\b/i.test(trimmed)) {
+    return "conversational";
   }
 
   // Check if it's a meta-question about the conversation/chat history itself
@@ -179,6 +186,8 @@ export function classifyIntent(prompt: string): AgentIntent {
     return hasRepoSignal ? "inquiry" : "conversational";
   }
 
-  // Otherwise assume it's a task instruction
-  return "task";
+  // Ambiguous follow-ups inherit the previous topic. Explicit actions, files,
+  // repository questions and current-info requests above always take priority.
+  if (hasRepoSignal) return "inquiry";
+  return previousIntent ?? "task";
 }

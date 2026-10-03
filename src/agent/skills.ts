@@ -13,7 +13,11 @@ export interface Skill {
   source: string;
 }
 
-export async function loadSkills(repoRoot: string, homeDir: string = os.homedir()): Promise<Skill[]> {
+export async function loadSkills(
+  repoRoot: string,
+  homeDir: string = os.homedir(),
+  readAllowed?: (file: string) => boolean,
+): Promise<Skill[]> {
   const dirs = [
     path.join(homeDir, ".codeagent", "skills"),
     path.join(repoRoot, ".codeagent", "skills"),
@@ -29,15 +33,40 @@ export async function loadSkills(repoRoot: string, homeDir: string = os.homedir(
     for (const entry of entries) {
       const skillFile = path.join(dir, entry, "SKILL.md");
       try {
-        const raw = await fs.readFile(skillFile, "utf8");
-        const desc = raw.match(/description\s*:\s*(.+)/i)?.[1]?.trim().slice(0, 200) ?? entry;
-        out.push({ name: entry, description: desc, body: raw, source: skillFile });
+        const owner = dir === dirs[0] ? homeDir : repoRoot;
+        const boundary = path.join(
+          await fs.realpath(owner),
+          ".codeagent",
+          "skills",
+        );
+        const actual = await fs.realpath(skillFile);
+        if (!actual.startsWith(boundary + path.sep)) continue;
+        if (
+          dir === dirs[1] &&
+          readAllowed &&
+          !readAllowed(
+            path.relative(repoRoot, skillFile).split(path.sep).join("/"),
+          )
+        )
+          continue;
+        const raw = await fs.readFile(actual, "utf8");
+        const desc =
+          raw
+            .match(/description\s*:\s*(.+)/i)?.[1]
+            ?.trim()
+            .slice(0, 200) ?? entry;
+        out.push({
+          name: entry,
+          description: desc,
+          body: raw,
+          source: skillFile,
+        });
       } catch {
         // not a skill dir
       }
     }
   }
-  return out;
+  return [...new Map(out.map((skill) => [skill.name, skill])).values()];
 }
 
 /** Descriptions always in context; bodies load when the model names the skill. */

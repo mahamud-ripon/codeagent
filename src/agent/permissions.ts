@@ -9,7 +9,12 @@ export type PermissionHandler = (req: PermissionRequest) => Promise<boolean>;
 
 export type PermissionMode = "default" | "acceptEdits" | "plan" | "bypass";
 
-const MODE_CYCLE: PermissionMode[] = ["default", "acceptEdits", "plan", "bypass"];
+const MODE_CYCLE: PermissionMode[] = [
+  "default",
+  "acceptEdits",
+  "plan",
+  "bypass",
+];
 
 /** SF-1 keyboard: Shift+Tab cycles default → acceptEdits → plan → bypass. */
 export function cyclePermissionMode(current: PermissionMode): PermissionMode {
@@ -88,7 +93,8 @@ export function splitShellSegments(command: string): string[] {
     if (c === "(") depth++;
     if (c === ")") depth = Math.max(0, depth - 1);
     const double = (c === "&" && next === "&") || (c === "|" && next === "|");
-    const single = c === ";" || (c === "|" && next !== "|") || (c === "&" && next !== "&");
+    const single =
+      c === ";" || (c === "|" && next !== "|") || (c === "&" && next !== "&");
     if (depth === 0 && (double || single)) {
       if (current.trim()) parts.push(current.trim());
       current = "";
@@ -104,7 +110,8 @@ export function splitShellSegments(command: string): string[] {
   let match: RegExpExecArray | null;
   while ((match = re.exec(command)) !== null) {
     const inner = (match[1] ?? match[2] ?? "").trim();
-    if (inner) subs.push(...splitShellSegments(inner).filter((s) => !s.includes("$(")));
+    if (inner)
+      subs.push(...splitShellSegments(inner).filter((s) => !s.includes("$(")));
   }
   return [...parts, ...subs];
 }
@@ -116,7 +123,11 @@ export function parsePermissionRule(raw: string): ParsedRule | null {
 }
 
 function globToRegExp(pattern: string): RegExp {
-  let source = pattern.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, "\u0000").replace(/\*/g, "[^/]*").replace(/\u0000/g, ".*");
+  let source = pattern
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*\*/g, "\u0000")
+    .replace(/\*/g, "[^/]*")
+    .replace(/\u0000/g, ".*");
   if (pattern.endsWith("/**")) {
     const base = pattern.slice(0, -3).replace(/[.+^${}()|[\]\\]/g, "\\$&");
     source = `${base}(?:/.*)?`;
@@ -125,7 +136,7 @@ function globToRegExp(pattern: string): RegExp {
 }
 
 function matchPath(filePath: string, pattern: string): boolean {
-  const normalized = filePath.replace(/\\/g, "/");
+  const normalized = filePath.replace(/\\/g, "/").replace(/^\.\//, "");
   if (pattern === "**" || pattern === "*") return true;
   return globToRegExp(pattern).test(normalized);
 }
@@ -218,7 +229,12 @@ export class PermissionManager {
   private addRule(bucket: "allow" | "deny" | "ask", raw: string): void {
     const parsed = parsePermissionRule(raw);
     if (!parsed) return;
-    const list = bucket === "allow" ? this.allowRules : bucket === "deny" ? this.denyRules : this.askRules;
+    const list =
+      bucket === "allow"
+        ? this.allowRules
+        : bucket === "deny"
+          ? this.denyRules
+          : this.askRules;
     list.push(parsed);
   }
 
@@ -255,7 +271,11 @@ export class PermissionManager {
   async checkCommand(command: string): Promise<boolean> {
     const segments = splitShellSegments(command);
     if (!this.isAutoApprove() && segments.some(isHardDenied)) return false;
-    if (!this.isAutoApprove() && (this.matches(this.denyRules, "Bash", command) || segments.some((s) => this.matches(this.denyRules, "Bash", s)))) {
+    if (
+      !this.isAutoApprove() &&
+      (this.matches(this.denyRules, "Bash", command) ||
+        segments.some((s) => this.matches(this.denyRules, "Bash", s)))
+    ) {
       return false;
     }
     if (this.isAutoApprove()) return true;
@@ -264,14 +284,24 @@ export class PermissionManager {
     // Code parity: network always prompts). An exact session allow
     // ("Always allow this exact command") stays silent so
     // allowCommand("git push") still permits "git push" handler-free.
-    if ((this.mode === "default" || this.mode === "acceptEdits") && isNetworkEgressCommand(command)) {
+    if (
+      (this.mode === "default" || this.mode === "acceptEdits") &&
+      isNetworkEgressCommand(command)
+    ) {
       if (this.hasExactAllow(command)) return true;
       const covered = segments.every((s) => this.segmentAllowed(s));
       if (!covered && !this.handler) return false;
-      if (this.handler) return this.handler({ type: "command", target: command, details: "network-egress" });
+      if (this.handler)
+        return this.handler({
+          type: "command",
+          target: command,
+          details: "network-egress",
+        });
       return false;
     }
-    const needsAsk = this.matches(this.askRules, "Bash", command) || segments.some((s) => this.matches(this.askRules, "Bash", s));
+    const needsAsk =
+      this.matches(this.askRules, "Bash", command) ||
+      segments.some((s) => this.matches(this.askRules, "Bash", s));
     if (!needsAsk && this.isCommandAllowed(command)) return true;
     if (!this.handler) return false;
     return this.handler({ type: "command", target: command });
@@ -283,16 +313,42 @@ export class PermissionManager {
    */
   async checkEdit(filePath: string, details?: string): Promise<boolean> {
     if (this.isAutoApprove()) return true;
-    if (this.matches(this.denyRules, "Edit", filePath) || this.matches(this.denyRules, "Write", filePath)) {
+    if (
+      this.matches(this.denyRules, "Edit", filePath) ||
+      this.matches(this.denyRules, "Write", filePath)
+    ) {
       return false;
     }
     if (this.mode === "plan") return false;
+    if (
+      this.matches(this.askRules, "Edit", filePath) ||
+      this.matches(this.askRules, "Write", filePath)
+    )
+      return this.handler
+        ? this.handler({ type: "edit", target: filePath, details })
+        : false;
     if (this.mode === "acceptEdits") return true;
-    if (this.matches(this.allowRules, "Edit", filePath) || this.matches(this.allowRules, "Write", filePath)) {
+    if (
+      this.matches(this.allowRules, "Edit", filePath) ||
+      this.matches(this.allowRules, "Write", filePath)
+    ) {
       return true;
     }
     if (!this.handler) return false;
-    return this.handler({ type: "edit", target: filePath, details, preview: details });
+    return this.handler({
+      type: "edit",
+      target: filePath,
+      details,
+      preview: details,
+    });
+  }
+
+  readDenyGlobs(): string[] {
+    return this.isAutoApprove()
+      ? []
+      : this.denyRules
+          .filter((r) => r.tool.toLowerCase() === "read")
+          .map((r) => r.pattern);
   }
 
   checkRead(filePath: string): boolean {
@@ -306,18 +362,30 @@ export class PermissionManager {
    * MCP(server:tool), or MCP(*). Deny wins; default asks via handler,
    * fail-closed headless when no handler is present. Bypass allows all.
    */
-  async checkMcp(server: string, tool: string): Promise<boolean> {
+  async checkMcp(
+    server: string,
+    tool: string,
+    details?: string,
+  ): Promise<boolean> {
     if (this.isAutoApprove()) return true;
     const denied = this.denyRules.some(
-      (r) => r.tool.toLowerCase() === "mcp" && matchMcpPattern(r.pattern, server, tool),
+      (r) =>
+        r.tool.toLowerCase() === "mcp" &&
+        matchMcpPattern(r.pattern, server, tool),
     );
     if (denied) return false;
     const allowed = this.allowRules.some(
-      (r) => r.tool.toLowerCase() === "mcp" && matchMcpPattern(r.pattern, server, tool),
+      (r) =>
+        r.tool.toLowerCase() === "mcp" &&
+        matchMcpPattern(r.pattern, server, tool),
     );
     if (allowed) return true;
     if (!this.handler) return false;
-    return this.handler({ type: "command", target: `mcp__${server}__${tool}`, details: "mcp-tool" });
+    return this.handler({
+      type: "command",
+      target: `mcp__${server}__${tool}`,
+      details: details ?? "mcp-tool",
+    });
   }
 }
 
@@ -326,12 +394,19 @@ export class PermissionManager {
  * Patterns: "*" | "server:*" | "server:tool" | "*:tool". Tool side supports
  * "*" prefix globs via matchPath semantics (case-insensitive).
  */
-function matchMcpPattern(pattern: string, server: string, tool: string): boolean {
+function matchMcpPattern(
+  pattern: string,
+  server: string,
+  tool: string,
+): boolean {
   const pat = pattern.trim();
   if (pat === "*" || pat === "*:*") return true;
   const colon = pat.indexOf(":");
   if (colon === -1) {
-    return pat.toLowerCase() === server.toLowerCase() || pat.toLowerCase() === `${server}:${tool}`.toLowerCase();
+    return (
+      pat.toLowerCase() === server.toLowerCase() ||
+      pat.toLowerCase() === `${server}:${tool}`.toLowerCase()
+    );
   }
   const sPat = pat.slice(0, colon).trim();
   const tPat = pat.slice(colon + 1).trim();

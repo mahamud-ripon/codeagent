@@ -37,14 +37,30 @@ export interface AgentState {
 export type AgentIntent = "conversational" | "inquiry" | "task" | "external";
 
 export interface AgentRunResult {
+  status?: import("../runtime/contracts.js").Lifecycle;
+  sessionId?: string;
+  runId?: string;
+  costKnown?: boolean;
   finalMessage: string;
   iterations: number;
   modifiedFiles: string[];
   testResults: TestRecord[];
   history?: unknown[];
   intent?: AgentIntent;
-  stopReason?: "ok" | "stuck" | "permission" | "budget" | "error";
-  usage?: { input: number; output: number; costUsd: number; cachedInput?: number };
+  stopReason?:
+    | "ok"
+    | "stuck"
+    | "permission"
+    | "budget"
+    | "error"
+    | "cancelled"
+    | "paused";
+  usage?: {
+    input: number;
+    output: number;
+    costUsd: number;
+    cachedInput?: number;
+  };
 }
 
 export function createInitialState(userRequest: string): AgentState {

@@ -21,6 +21,24 @@ let outputChannel = null;
 let chatViewProvider = null;
 let statusBarItem = null;
 let isRunning = false;
+let extensionContext;
+let savedSessionId;
+function rememberSession(id) {
+  savedSessionId = id;
+  void extensionContext?.workspaceState.update("codeagent.sessionId", id);
+}
+async function request(method, params = {}) {
+  await ensureBridge();
+  const id = nextId++;
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve, reject });
+    send({ jsonrpc: "2.0", id, method, params });
+  });
+}
+async function attachSession(sessionId) {
+  await request("agent/attach", { sessionId });
+  rememberSession(sessionId);
+}
 
 function getCliCommand() {
   const config = vscode.workspace.getConfiguration("codeagent");
@@ -29,13 +47,13 @@ function getCliCommand() {
 
 function shouldAutoApprove() {
   const config = vscode.workspace.getConfiguration("codeagent");
-  return config.get("autoApprove", true);
+  return config.get("autoApprove", false);
 }
 
 function getModel() {
   const config = vscode.workspace.getConfiguration("codeagent");
   const model = config.get("model");
-  return (typeof model === "string" && model.trim()) ? model.trim() : undefined;
+  return typeof model === "string" && model.trim() ? model.trim() : undefined;
 }
 
 function getMaxIterations() {
@@ -73,8 +91,64 @@ function handleLine(line) {
   }
 
   if (msg.method === "agent/event") {
-    const e = msg.params || {};
-    if (chatViewProvider) {
+    const envelope = msg.params || {};
+    const e =
+      envelope.version === 1
+        ? {
+            ...envelope.data,
+            type: envelope.type,
+            id: envelope.correlationId,
+            sessionId: envelope.sessionId,
+            agentId: envelope.agentId,
+          }
+        : envelope;
+    if (e.sessionId) rememberSession(e.sessionId);
+    if (e.type === "status" && e.agentId === "coordinator")
+      updateStatus(
+        ["running", "waiting_for_approval", "waiting_for_input"].includes(
+          e.status,
+        ),
+      );
+    if (e.type === "done" && e.agentId === "coordinator") updateStatus(false);
+    if (e.type === "tool_intent") e.type = "tool_start";
+    if (e.type === "tool_result") e.type = "tool_end";
+    if (e.type === "done") {
+      e.result = envelope.data;
+    }
+    if (
+      [
+        "tasks",
+        "verification",
+        "worker_started",
+        "worker_finished",
+        "worker_integrated",
+      ].includes(e.type)
+    ) {
+      outputChannel =
+        outputChannel || vscode.window.createOutputChannel("CodeAgent");
+      outputChannel.appendLine(
+        `[${e.agentId}] ${e.type}: ${JSON.stringify(envelope.data)}`,
+      );
+    }
+    if (e.type === "approval_request" || e.type === "input_request") {
+      const requestId = envelope.data.id;
+      const answer =
+        e.type === "approval_request"
+          ? vscode.window
+              .showWarningMessage(e.prompt, { modal: true }, "Allow")
+              .then((value) => value === "Allow")
+          : vscode.window.showInputBox({ prompt: e.prompt });
+      void answer.then((value) => {
+        if (value !== undefined && proc)
+          send({
+            jsonrpc: "2.0",
+            id: nextId++,
+            method: "agent/answer",
+            params: { id: requestId, answer: value },
+          });
+      });
+    }
+    if (chatViewProvider && (e.agentId === "coordinator" || !e.agentId)) {
       chatViewProvider.handleAgentEvent(e);
     }
 
@@ -82,10 +156,15 @@ function handleLine(line) {
       if (e.type === "text_delta") {
         outputChannel.append(e.text);
       } else if (e.type === "tool_start") {
-        outputChannel.appendLine(`\n[tool] ${e.name} ${JSON.stringify(e.args || {})}`);
+        outputChannel.appendLine(
+          `\n[tool] ${e.name} ${JSON.stringify(e.args || {})}`,
+        );
       } else if (e.type === "usage") {
-        const cost = typeof e.costUsd === "number" ? ` $${e.costUsd.toFixed(4)}` : "";
-        outputChannel.appendLine(`\n[usage] ${e.input} in / ${e.output} out${cost}`);
+        const cost =
+          typeof e.costUsd === "number" ? ` $${e.costUsd.toFixed(4)}` : "";
+        outputChannel.appendLine(
+          `\n[usage] ${e.input} in / ${e.output} out${cost}`,
+        );
       } else if (e.type === "error") {
         outputChannel.appendLine(`\n[error] ${e.message}`);
         vscode.window.showErrorMessage(`CodeAgent: ${e.message}`);
@@ -108,7 +187,8 @@ function handleLine(line) {
 function ensureBridge() {
   if (proc) return Promise.resolve();
   return new Promise((resolve, reject) => {
-    outputChannel = outputChannel || vscode.window.createOutputChannel("CodeAgent");
+    outputChannel =
+      outputChannel || vscode.window.createOutputChannel("CodeAgent");
     const cli = getCliCommand();
     const args = ["--acp"];
     if (shouldAutoApprove()) {
@@ -125,7 +205,11 @@ function ensureBridge() {
     proc.on("error", (e) => {
       proc = null;
       updateStatus(false);
-      reject(new Error(`Could not start '${cli} --acp' (is the CLI installed on PATH?): ${e.message}`));
+      reject(
+        new Error(
+          `Could not start '${cli} --acp' (is the CLI installed on PATH?): ${e.message}`,
+        ),
+      );
     });
 
     proc.stdout.setEncoding("utf8");
@@ -153,7 +237,12 @@ function ensureBridge() {
 
     const id = nextId++;
     pending.set(id, { resolve, reject });
-    send({ jsonrpc: "2.0", id, method: "initialize", params: {} });
+    send({
+      jsonrpc: "2.0",
+      id,
+      method: "initialize",
+      params: { protocolVersion: "1.0" },
+    });
   });
 }
 
@@ -170,6 +259,7 @@ async function executeTask(taskPrompt, repoPath) {
     await ensureBridge();
     const id = nextId++;
     const runParams = {
+      sessionId: savedSessionId,
       task: taskPrompt,
       repoRoot,
       autoApprove: shouldAutoApprove(),
@@ -203,7 +293,7 @@ async function executeTask(taskPrompt, repoPath) {
   }
 }
 
-function handleSlashCommand(rawCmd) {
+async function handleSlashCommand(rawCmd) {
   const parts = rawCmd.split(/\s+/);
   const cmd = parts[0].toLowerCase();
   const arg = parts.slice(1).join(" ").trim();
@@ -215,6 +305,12 @@ function handleSlashCommand(rawCmd) {
   switch (cmd) {
     case "/clear":
     case "/new":
+      if (isRunning)
+        throw new Error(
+          "Detach or finish the current task before starting a new session.",
+        );
+      await request("agent/new");
+      rememberSession(undefined);
       if (chatViewProvider) {
         chatViewProvider.clearChat();
       }
@@ -267,19 +363,25 @@ function handleSlashCommand(rawCmd) {
       try {
         const fs = require("node:fs");
         const path = require("node:path");
-        const sessionsDir = repoRoot ? path.join(repoRoot, ".codeagent", "sessions") : null;
+        const sessionsDir = repoRoot
+          ? path.join(repoRoot, ".codeagent", "sessions")
+          : null;
         if (sessionsDir && fs.existsSync(sessionsDir)) {
-          const files = fs.readdirSync(sessionsDir).filter((f) => f.endsWith(".json") || f.endsWith(".jsonl"));
+          const files = fs
+            .readdirSync(sessionsDir)
+            .filter((f) => f.endsWith(".json") || f.endsWith(".jsonl"));
           if (files.length > 0) {
             sessionInfo += `Found **${files.length}** saved session(s) in this workspace:\n`;
             for (const f of files.slice(0, 10)) {
               sessionInfo += `- \`${f}\`\n`;
             }
           } else {
-            sessionInfo += "No saved sessions found in `.codeagent/sessions/`. Start coding to create sessions!\n";
+            sessionInfo +=
+              "No saved sessions found in `.codeagent/sessions/`. Start coding to create sessions!\n";
           }
         } else {
-          sessionInfo += "No `.codeagent/sessions` directory found in the active workspace.\n";
+          sessionInfo +=
+            "No `.codeagent/sessions` directory found in the active workspace.\n";
         }
       } catch (e) {
         sessionInfo += `Could not read sessions: ${e.message}\n`;
@@ -296,12 +398,16 @@ function handleSlashCommand(rawCmd) {
         const config = vscode.workspace.getConfiguration("codeagent");
         config.update("model", arg, vscode.ConfigurationTarget.Global);
         if (chatViewProvider) {
-          chatViewProvider.showAgentMessage(`✅ Switched model override to \`${arg}\`.`);
+          chatViewProvider.showAgentMessage(
+            `✅ Switched model override to \`${arg}\`.`,
+          );
         }
       } else {
         const current = getModel() || "(from env)";
         if (chatViewProvider) {
-          chatViewProvider.showAgentMessage(`**Current Model**: \`${current}\`\n\nTo change: \`/model <model_name>\` (e.g. \`/model llama-3.3-70b-versatile\`)`);
+          chatViewProvider.showAgentMessage(
+            `**Current Model**: \`${current}\`\n\nTo change: \`/model <model_name>\` (e.g. \`/model llama-3.3-70b-versatile\`)`,
+          );
         }
       }
       break;
@@ -309,7 +415,9 @@ function handleSlashCommand(rawCmd) {
 
     default:
       if (chatViewProvider) {
-        chatViewProvider.showAgentMessage(`Unknown command \`${cmd}\`. Type \`/help\` to see available slash commands.`);
+        chatViewProvider.showAgentMessage(
+          `Unknown command \`${cmd}\`. Type \`/help\` to see available slash commands.`,
+        );
       }
       break;
   }
@@ -337,7 +445,9 @@ class CodeAgentChatViewProvider {
           if (data.prompt && data.prompt.trim()) {
             const prompt = data.prompt.trim();
             if (prompt.startsWith("/")) {
-              handleSlashCommand(prompt);
+              await handleSlashCommand(prompt).catch((e) =>
+                vscode.window.showErrorMessage(e.message),
+              );
               return;
             }
             try {
@@ -392,9 +502,18 @@ class CodeAgentChatViewProvider {
     if (event.type === "text_delta") {
       this._view.webview.postMessage({ type: "textDelta", text: event.text });
     } else if (event.type === "tool_start") {
-      this._view.webview.postMessage({ type: "toolStart", name: event.name, args: event.args });
+      this._view.webview.postMessage({
+        type: "toolStart",
+        name: event.name,
+        args: event.args,
+      });
     } else if (event.type === "usage") {
-      this._view.webview.postMessage({ type: "usage", input: event.input, output: event.output, costUsd: event.costUsd });
+      this._view.webview.postMessage({
+        type: "usage",
+        input: event.input,
+        output: event.output,
+        costUsd: event.costUsd,
+      });
     } else if (event.type === "error") {
       this._view.webview.postMessage({ type: "error", message: event.message });
     }
@@ -408,7 +527,10 @@ class CodeAgentChatViewProvider {
 
   taskFailed(err) {
     if (this._view) {
-      this._view.webview.postMessage({ type: "agentError", message: err.message });
+      this._view.webview.postMessage({
+        type: "agentError",
+        message: err.message,
+      });
     }
   }
 
@@ -929,89 +1051,167 @@ function getSelectedCodeContext() {
 }
 
 function activate(context) {
+  extensionContext = context;
+  savedSessionId = context.workspaceState.get("codeagent.sessionId");
+  context.subscriptions.push(
+    vscode.commands.registerCommand("codeagent.attachSession", async () => {
+      const id = await vscode.window.showInputBox({
+        prompt: "CodeAgent session ID",
+        value: savedSessionId,
+      });
+      if (id)
+        await attachSession(id.trim()).catch((e) =>
+          vscode.window.showErrorMessage(e.message),
+        );
+    }),
+    vscode.commands.registerCommand("codeagent.steerTask", async () => {
+      const text = await vscode.window.showInputBox({
+        prompt: "Add instructions to the running task",
+      });
+      if (text) {
+        if (!proc && savedSessionId) await attachSession(savedSessionId);
+        await request("agent/steer", { text }).catch((e) =>
+          vscode.window.showErrorMessage(e.message),
+        );
+      }
+    }),
+    vscode.commands.registerCommand("codeagent.inspectSession", async () => {
+      if (!savedSessionId) return;
+      const state = await request("agent/inspect", {
+        sessionId: savedSessionId,
+      });
+      outputChannel.appendLine(JSON.stringify(state, null, 2));
+      outputChannel.show();
+    }),
+    vscode.commands.registerCommand("codeagent.detachSession", () => {
+      if (proc) proc.kill();
+      proc = null;
+      updateStatus(false);
+      vscode.window.showInformationMessage(
+        `CodeAgent continues in session ${savedSessionId}. Use Attach Session to reconnect.`,
+      );
+    }),
+  );
   // 1. Register Sidebar Webview View
   chatViewProvider = new CodeAgentChatViewProvider(context.extensionUri);
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider("codeagent.chatView", chatViewProvider, {
-      webviewOptions: { retainContextWhenHidden: true },
-    }),
+    vscode.window.registerWebviewViewProvider(
+      "codeagent.chatView",
+      chatViewProvider,
+      {
+        webviewOptions: { retainContextWhenHidden: true },
+      },
+    ),
   );
 
   // 2. Status Bar Item
-  statusBarItem = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 100);
+  statusBarItem = vscode.window.createStatusBarItem(
+    vscode.StatusBarAlignment.Right,
+    100,
+  );
   updateStatus(false);
   statusBarItem.show();
   context.subscriptions.push(statusBarItem);
 
   // 3. Open Chat Command
   const openChat = vscode.commands.registerCommand("codeagent.openChat", () => {
-    vscode.commands.executeCommand("workbench.view.extension.codeagent-sidebar");
+    vscode.commands.executeCommand(
+      "workbench.view.extension.codeagent-sidebar",
+    );
   });
 
   // 4. Run Task Command (Input Box)
-  const runTask = vscode.commands.registerCommand("codeagent.runTask", async () => {
-    const task = await vscode.window.showInputBox({
-      prompt: "Describe task for CodeAgent",
-      placeHolder: "Fix failing test, refactor method, implement new endpoint...",
-    });
-    if (!task || !task.trim()) return;
-    try {
-      await executeTask(task.trim());
-    } catch (e) {
-      vscode.window.showErrorMessage(`CodeAgent: ${e.message}`);
-    }
-  });
+  const runTask = vscode.commands.registerCommand(
+    "codeagent.runTask",
+    async () => {
+      const task = await vscode.window.showInputBox({
+        prompt: "Describe task for CodeAgent",
+        placeHolder:
+          "Fix failing test, refactor method, implement new endpoint...",
+      });
+      if (!task || !task.trim()) return;
+      try {
+        await executeTask(task.trim());
+      } catch (e) {
+        vscode.window.showErrorMessage(`CodeAgent: ${e.message}`);
+      }
+    },
+  );
 
   // 5. Cancel Task Command
-  const cancelTask = vscode.commands.registerCommand("codeagent.cancelTask", async () => {
-    if (!proc) return;
-    const id = nextId++;
-    await new Promise((resolve, reject) => {
-      pending.set(id, { resolve, reject });
-      send({ jsonrpc: "2.0", id, method: "agent/cancel", params: {} });
-    }).catch(() => {});
-    updateStatus(false);
-  });
+  const cancelTask = vscode.commands.registerCommand(
+    "codeagent.cancelTask",
+    async () => {
+      if (!proc) return;
+      const id = nextId++;
+      await new Promise((resolve, reject) => {
+        pending.set(id, { resolve, reject });
+        send({ jsonrpc: "2.0", id, method: "agent/cancel", params: {} });
+      }).catch(() => {});
+      updateStatus(false);
+    },
+  );
 
   // 6. Editor Context Actions
-  const explainCode = vscode.commands.registerCommand("codeagent.explainCode", async () => {
-    const ctx = getSelectedCodeContext();
-    if (!ctx || !ctx.selectedText) return;
-    const prompt = `Explain the following code from ${ctx.filePath}:\n\n\`\`\`${ctx.language}\n${ctx.selectedText}\n\`\`\``;
-    vscode.commands.executeCommand("codeagent.openChat");
-    await executeTask(prompt);
-  });
-
-  const fixCode = vscode.commands.registerCommand("codeagent.fixCode", async () => {
-    const ctx = getSelectedCodeContext();
-    if (!ctx || !ctx.selectedText) return;
-    const prompt = `Diagnose and fix any bugs, errors, or performance issues in the following code from ${ctx.filePath}:\n\n\`\`\`${ctx.language}\n${ctx.selectedText}\n\`\`\``;
-    vscode.commands.executeCommand("codeagent.openChat");
-    await executeTask(prompt);
-  });
-
-  const refactorCode = vscode.commands.registerCommand("codeagent.refactorCode", async () => {
-    const ctx = getSelectedCodeContext();
-    if (!ctx || !ctx.selectedText) return;
-    const prompt = `Refactor and clean up the following code from ${ctx.filePath} for readability, maintainability, and best practices:\n\n\`\`\`${ctx.language}\n${ctx.selectedText}\n\`\`\``;
-    vscode.commands.executeCommand("codeagent.openChat");
-    await executeTask(prompt);
-  });
-
-  const generateTests = vscode.commands.registerCommand("codeagent.generateTests", async () => {
-    const ctx = getSelectedCodeContext();
-    if (!ctx || !ctx.selectedText) return;
-    const prompt = `Write unit tests covering happy paths, error handling, and edge cases for the following code from ${ctx.filePath}:\n\n\`\`\`${ctx.language}\n${ctx.selectedText}\n\`\`\``;
-    vscode.commands.executeCommand("codeagent.openChat");
-    await executeTask(prompt);
-  });
-
-  context.subscriptions.push(openChat, runTask, cancelTask, explainCode, fixCode, refactorCode, generateTests, {
-    dispose: () => {
-      if (proc) proc.kill();
-      proc = null;
+  const explainCode = vscode.commands.registerCommand(
+    "codeagent.explainCode",
+    async () => {
+      const ctx = getSelectedCodeContext();
+      if (!ctx || !ctx.selectedText) return;
+      const prompt = `Explain the following code from ${ctx.filePath}:\n\n\`\`\`${ctx.language}\n${ctx.selectedText}\n\`\`\``;
+      vscode.commands.executeCommand("codeagent.openChat");
+      await executeTask(prompt);
     },
-  });
+  );
+
+  const fixCode = vscode.commands.registerCommand(
+    "codeagent.fixCode",
+    async () => {
+      const ctx = getSelectedCodeContext();
+      if (!ctx || !ctx.selectedText) return;
+      const prompt = `Diagnose and fix any bugs, errors, or performance issues in the following code from ${ctx.filePath}:\n\n\`\`\`${ctx.language}\n${ctx.selectedText}\n\`\`\``;
+      vscode.commands.executeCommand("codeagent.openChat");
+      await executeTask(prompt);
+    },
+  );
+
+  const refactorCode = vscode.commands.registerCommand(
+    "codeagent.refactorCode",
+    async () => {
+      const ctx = getSelectedCodeContext();
+      if (!ctx || !ctx.selectedText) return;
+      const prompt = `Refactor and clean up the following code from ${ctx.filePath} for readability, maintainability, and best practices:\n\n\`\`\`${ctx.language}\n${ctx.selectedText}\n\`\`\``;
+      vscode.commands.executeCommand("codeagent.openChat");
+      await executeTask(prompt);
+    },
+  );
+
+  const generateTests = vscode.commands.registerCommand(
+    "codeagent.generateTests",
+    async () => {
+      const ctx = getSelectedCodeContext();
+      if (!ctx || !ctx.selectedText) return;
+      const prompt = `Write unit tests covering happy paths, error handling, and edge cases for the following code from ${ctx.filePath}:\n\n\`\`\`${ctx.language}\n${ctx.selectedText}\n\`\`\``;
+      vscode.commands.executeCommand("codeagent.openChat");
+      await executeTask(prompt);
+    },
+  );
+
+  context.subscriptions.push(
+    openChat,
+    runTask,
+    cancelTask,
+    explainCode,
+    fixCode,
+    refactorCode,
+    generateTests,
+    {
+      dispose: () => {
+        if (proc) proc.kill();
+        proc = null;
+      },
+    },
+  );
 }
 
 function deactivate() {

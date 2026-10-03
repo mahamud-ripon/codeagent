@@ -1,7 +1,16 @@
 import type OpenAI from "openai";
 import { toChatTools } from "./tools.js";
-import type { ResponsesCreateResult, Responder, ResponderOptions } from "./client.js";
-import { collectProviderEvents, streamChatChunks, type ChatStreamChunk, type Provider } from "./stream.js";
+import type {
+  ResponsesCreateResult,
+  Responder,
+  ResponderOptions,
+} from "./client.js";
+import {
+  collectProviderEvents,
+  streamChatChunks,
+  type ChatStreamChunk,
+  type Provider,
+} from "./stream.js";
 import type { ProviderEvent, StreamRequest } from "./events.js";
 import { getModelCapabilities } from "./capabilities.js";
 import { withProviderRetry } from "./retry.js";
@@ -25,6 +34,7 @@ export interface MinimalChatClient {
     completions: {
       create(body: {
         model: string;
+        max_tokens?: number;
         messages: ChatMessage[];
         tools?: ChatTool[];
         stream?: boolean;
@@ -52,8 +62,12 @@ export interface MinimalChatClient {
   };
 }
 
-function isAsyncIterable(value: unknown): value is AsyncIterable<ChatStreamChunk> {
-  return typeof value === "object" && value !== null && Symbol.asyncIterator in value;
+function isAsyncIterable(
+  value: unknown,
+): value is AsyncIterable<ChatStreamChunk> {
+  return (
+    typeof value === "object" && value !== null && Symbol.asyncIterator in value
+  );
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {
@@ -81,7 +95,9 @@ function extractMessageText(item: Record<string, unknown>): string {
  * AG-15: mixed text/image user content is preserved as OpenAI
  * [{type:"text"}|{type:"image_url"}] parts.
  */
-export function responsesHistoryToChatMessages(input: unknown[]): ChatMessage[] {
+export function responsesHistoryToChatMessages(
+  input: unknown[],
+): ChatMessage[] {
   const messages: ChatMessage[] = [];
   let pendingText = "";
   let pendingCalls: Array<{
@@ -138,27 +154,45 @@ export function responsesHistoryToChatMessages(input: unknown[]): ChatMessage[] 
       const content = (raw as { content?: unknown }).content;
       // AG-15: preserve mixed text/image arrays for vision models.
       if (Array.isArray(content)) {
-        const parts: Array<{ type: string; text?: string; image_url?: { url: string } }> = [];
+        const parts: Array<{
+          type: string;
+          text?: string;
+          image_url?: { url: string };
+        }> = [];
         for (const p of content as Array<Record<string, unknown>>) {
           if (!isRecord(p)) continue;
-          if (typeof p.text === "string" && (p.type === "input_text" || p.type === "text")) {
+          if (
+            typeof p.text === "string" &&
+            (p.type === "input_text" || p.type === "text")
+          ) {
             parts.push({ type: "text", text: p.text as string });
           } else if (typeof p.text === "string" && !p.type) {
             parts.push({ type: "text", text: p.text as string });
           } else if (p.type === "input_image" || p.type === "image_url") {
             const inner = p.image_url as { url?: string } | undefined;
-            const url = typeof inner?.url === "string" ? inner.url
-              : typeof p.image_url === "string" ? (p.image_url as string)
-              : typeof p.data === "string" ? `data:${String(p.media_type ?? "image/png")};base64,${p.data as string}` : null;
+            const url =
+              typeof inner?.url === "string"
+                ? inner.url
+                : typeof p.image_url === "string"
+                  ? (p.image_url as string)
+                  : typeof p.data === "string"
+                    ? `data:${String(p.media_type ?? "image/png")};base64,${p.data as string}`
+                    : null;
             if (url) parts.push({ type: "image_url", image_url: { url } });
           }
         }
-        messages.push({ role: raw.role, content: parts as unknown as string } as ChatMessage);
+        messages.push({
+          role: raw.role,
+          content: parts as unknown as string,
+        } as ChatMessage);
         continue;
       }
       messages.push({
         role: raw.role,
-        content: typeof raw.content === "string" ? raw.content : String(raw.content ?? ""),
+        content:
+          typeof raw.content === "string"
+            ? raw.content
+            : String(raw.content ?? ""),
       } as ChatMessage);
       continue;
     }
@@ -198,7 +232,10 @@ export function extractThinking(msg: {
   let content = msg.content ?? "";
 
   // 1. Direct reasoning fields
-  if (typeof msg.reasoning_content === "string" && msg.reasoning_content.trim()) {
+  if (
+    typeof msg.reasoning_content === "string" &&
+    msg.reasoning_content.trim()
+  ) {
     parts.push(msg.reasoning_content.trim());
   }
   if (typeof msg.reasoning === "string" && msg.reasoning.trim()) {
@@ -246,10 +283,13 @@ export function extractThinking(msg: {
  * empty stream when more than one system message is present, and native
  * Anthropic/Gemini requests carry system outside `messages` (ML-1/ML-9).
  */
-export function extractHistorySystems(messages: Array<{ role?: string; content?: unknown }>): string[] {
+export function extractHistorySystems(
+  messages: Array<{ role?: string; content?: unknown }>,
+): string[] {
   const out: string[] = [];
   for (const m of messages) {
-    if (m?.role === "system" && typeof m.content === "string" && m.content) out.push(m.content);
+    if (m?.role === "system" && typeof m.content === "string" && m.content)
+      out.push(m.content);
   }
   return out;
 }
@@ -268,21 +308,25 @@ export async function* parseChatSse(
     const dataLines: string[] = [];
     let isErrorEvent = false;
     for (const line of block.split("\n")) {
-      if (line.startsWith("event:") && line.slice(6).trim() === "error") isErrorEvent = true;
+      if (line.startsWith("event:") && line.slice(6).trim() === "error")
+        isErrorEvent = true;
       if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
     }
     if (dataLines.length === 0) return;
     const dataRaw = dataLines.join("\n");
     if (dataRaw === "[DONE]") return;
     try {
-      const parsed = JSON.parse(dataRaw) as ChatStreamChunk & { error?: { message?: string } };
+      const parsed = JSON.parse(dataRaw) as ChatStreamChunk & {
+        error?: { message?: string };
+      };
       if (isErrorEvent || parsed.error) {
         const msg = parsed.error?.message ?? dataRaw;
         throw new Error(`Chat upstream error: ${msg}`);
       }
       yield parsed;
     } catch (e) {
-      if (e instanceof Error && e.message.startsWith("Chat upstream error:")) throw e;
+      if (e instanceof Error && e.message.startsWith("Chat upstream error:"))
+        throw e;
       // Truncated JSON frame — same fault-injection tolerance as other adapters.
     }
   };
@@ -298,7 +342,10 @@ export async function* parseChatSse(
   // Uint8Array chunks, which String() would corrupt into "104,101,...".
   if (Symbol.asyncIterator in Object(stream)) {
     for await (const part of stream as AsyncIterable<string | Uint8Array>) {
-      buffer += typeof part === "string" ? part : decoder.decode(part, { stream: true });
+      buffer +=
+        typeof part === "string"
+          ? part
+          : decoder.decode(part, { stream: true });
       yield* drainComplete();
     }
     buffer += decoder.decode();
@@ -337,7 +384,10 @@ export interface ChatStreamOptions {
  * chat/compat backend is no longer responder-only.
  */
 export function createChatStreamProvider(opts: ChatStreamOptions): Provider {
-  const base = (opts.baseURL ?? "https://api.openai.com/v1").replace(/\/+$/, "");
+  const base = (opts.baseURL ?? "https://api.openai.com/v1").replace(
+    /\/+$/,
+    "",
+  );
   const fetchImpl = opts.fetchImpl ?? fetch;
   return {
     capabilities: getModelCapabilities(opts.model),
@@ -346,42 +396,63 @@ export function createChatStreamProvider(opts: ChatStreamOptions): Provider {
       // One system message total: history systems (repo context, memory)
       // fold into the head — extra system messages make some compat
       // endpoints return an empty stream (observed live, Qwen via proxy).
-      const extraSystem = extractHistorySystems(history as Array<{ role?: string; content?: unknown }>);
-      const rest = history.filter(
-        (m) => (m as { role?: string }).role !== "system" || typeof (m as { content?: unknown }).content !== "string",
+      const extraSystem = extractHistorySystems(
+        history as Array<{ role?: string; content?: unknown }>,
       );
-      const head = [opts.systemPrompt, req.system, ...extraSystem].filter(Boolean).join("\n\n");
+      const rest = history.filter(
+        (m) =>
+          (m as { role?: string }).role !== "system" ||
+          typeof (m as { content?: unknown }).content !== "string",
+      );
+      const head = [opts.systemPrompt, req.system, ...extraSystem]
+        .filter(Boolean)
+        .join("\n\n");
       const messages: ChatMessage[] = [
         ...(head ? [{ role: "system", content: head } as ChatMessage] : []),
         ...rest,
       ];
-      const res = await withProviderRetry(() =>
-        fetchImpl(`${base}/chat/completions`, {
-          method: "POST",
-          headers: { "content-type": "application/json", authorization: `Bearer ${opts.apiKey}` },
-          body: JSON.stringify({
-            model: opts.model,
-            messages,
-            tools: req.tools ? (toChatTools({ exclude: req.exclude }) as unknown as ChatTool[]) : undefined,
-            stream: true,
-            stream_options: { include_usage: true },
+      const res = await withProviderRetry(
+        () =>
+          fetchImpl(`${base}/chat/completions`, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              authorization: `Bearer ${opts.apiKey}`,
+            },
+            body: JSON.stringify({
+              model: opts.model,
+              max_tokens: req.maxOutput,
+              messages,
+              tools: req.tools
+                ? (toChatTools({
+                    exclude: req.exclude,
+                    definitions: req.toolDefinitions,
+                  }) as unknown as ChatTool[])
+                : undefined,
+              stream: true,
+              stream_options: { include_usage: true },
+            }),
+            signal: req.signal,
+          }).then(async (r) => {
+            if (!r.ok) {
+              const text = await r.text().catch(() => "");
+              const err = new Error(
+                `Chat ${r.status}: ${text.slice(0, 300)}`,
+              ) as Error & { status?: number };
+              (err as { status?: number }).status = r.status;
+              throw err;
+            }
+            return r;
           }),
-          signal: req.signal,
-        }).then(async (r) => {
-          if (!r.ok) {
-            const text = await r.text().catch(() => "");
-            const err = new Error(`Chat ${r.status}: ${text.slice(0, 300)}`) as Error & { status?: number };
-            (err as { status?: number }).status = r.status;
-            throw err;
-          }
-          return r;
-        }),
         // Inner layer: initial fetch POST only (outer retries whole stream).
         { signal: req.signal, maxAttempts: 2 },
       );
       if (!res.body) throw new Error("Chat stream had no body.");
-      yield* streamChatChunks(parseChatSse(res.body as ReadableStream<Uint8Array>));
-      if (req.signal?.aborted) throw new Error("Provider request cancelled (AbortSignal).");
+      yield* streamChatChunks(
+        parseChatSse(res.body as ReadableStream<Uint8Array>),
+      );
+      if (req.signal?.aborted)
+        throw new Error("Provider request cancelled (AbortSignal).");
     },
   };
 }
@@ -392,22 +463,39 @@ export function createChatResponder(
 ): Responder {
   return async (input: unknown[], options?: ResponderOptions) => {
     const history = responsesHistoryToChatMessages(input);
-    const extraSystem = extractHistorySystems(history as Array<{ role?: string; content?: unknown }>);
-    const rest = history.filter(
-      (m) => (m as { role?: string }).role !== "system" || typeof (m as { content?: unknown }).content !== "string",
+    const extraSystem = extractHistorySystems(
+      history as Array<{ role?: string; content?: unknown }>,
     );
-    const head = [args.systemPrompt, ...extraSystem].filter(Boolean).join("\n\n");
-    const messages: ChatMessage[] = [...(head ? [{ role: "system", content: head } as ChatMessage] : []), ...rest];
+    const rest = history.filter(
+      (m) =>
+        (m as { role?: string }).role !== "system" ||
+        typeof (m as { content?: unknown }).content !== "string",
+    );
+    const head = [args.systemPrompt, ...extraSystem]
+      .filter(Boolean)
+      .join("\n\n");
+    const messages: ChatMessage[] = [
+      ...(head ? [{ role: "system", content: head } as ChatMessage] : []),
+      ...rest,
+    ];
 
     const useTools = options?.tools ?? true;
     const created = await withProviderRetry(
       () =>
         client.chat.completions.create({
           model: args.model,
+          max_tokens: options?.maxOutput,
           messages,
           stream: true,
           stream_options: { include_usage: true },
-          ...(useTools ? { tools: toChatTools({ exclude: options?.exclude }) as unknown as ChatTool[] } : {}),
+          ...(useTools
+            ? {
+                tools: toChatTools({
+                  exclude: options?.exclude,
+                  definitions: options?.toolDefinitions,
+                }) as unknown as ChatTool[],
+              }
+            : {}),
         }),
       { signal: options?.signal, maxAttempts: 2 },
     );
@@ -432,6 +520,11 @@ export function createChatResponder(
         arguments: tc.function.arguments,
       });
     }
-    return { output, output_text: text, reasoning_text: thinking, finish_reason };
+    return {
+      output,
+      output_text: text,
+      reasoning_text: thinking,
+      finish_reason,
+    };
   };
 }

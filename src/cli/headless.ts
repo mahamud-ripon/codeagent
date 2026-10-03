@@ -1,9 +1,19 @@
 export type OutputFormat = "text" | "json" | "stream-json";
 
-export type StopReason = "ok" | "stuck" | "permission" | "budget" | "error" | "config";
+export type StopReason =
+  | "ok"
+  | "stuck"
+  | "permission"
+  | "budget"
+  | "error"
+  | "config";
 
 export function exitCodeForStopReason(reason?: string): number {
   switch (reason) {
+    case "paused":
+      return 5;
+    case "cancelled":
+      return 130;
     case "permission":
       return 2;
     case "budget":
@@ -30,7 +40,12 @@ export interface HeadlessResult {
   finalMessage: string;
   iterations: number;
   modifiedFiles: string[];
-  usage?: { input: number; output: number; costUsd?: number; cachedInput?: number };
+  usage?: {
+    input: number;
+    output: number;
+    costUsd?: number;
+    cachedInput?: number;
+  };
 }
 
 export function renderJsonResult(result: HeadlessResult): string {

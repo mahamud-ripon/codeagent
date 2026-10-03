@@ -10,7 +10,11 @@ let tmp: string;
 
 beforeEach(async () => {
   tmp = await fs.mkdtemp(path.join(os.tmpdir(), "agent-loop-"));
-  await writeFile(tmp, "math.ts", "export function add(a: number, b: number) {\n  return a - b;\n}\n");
+  await writeFile(
+    tmp,
+    "math.ts",
+    "export function add(a: number, b: number) {\n  return a - b;\n}\n",
+  );
 });
 
 afterEach(async () => {
@@ -18,7 +22,12 @@ afterEach(async () => {
 });
 
 function fc(call_id: string, name: string, args: Record<string, unknown>) {
-  return { type: "function_call", call_id, name, arguments: JSON.stringify(args) };
+  return {
+    type: "function_call",
+    call_id,
+    name,
+    arguments: JSON.stringify(args),
+  };
 }
 
 describe("agent loop", () => {
@@ -27,14 +36,20 @@ describe("agent loop", () => {
     const responder: Responder = async () => {
       const n = calls.length;
       calls.push(`turn-${n}`);
-      if (n === 0) return { output: [fc("c1", "read_file", { path: "math.ts" })], output_text: "" };
+      if (n === 0)
+        return {
+          output: [fc("c1", "read_file", { path: "math.ts" })],
+          output_text: "",
+        };
       if (n === 1) {
         return {
-          output: [fc("c2", "edit_file", {
-            path: "math.ts",
-            old_text: "return a - b;",
-            new_text: "return a + b;",
-          })],
+          output: [
+            fc("c2", "edit_file", {
+              path: "math.ts",
+              old_text: "return a - b;",
+              new_text: "return a + b;",
+            }),
+          ],
           output_text: "",
         };
       }
@@ -42,7 +57,14 @@ describe("agent loop", () => {
       return { output: [], output_text: "## Summary\nFixed add().\n" };
     };
 
-    const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 10, responder, verbose: false, autoApprove: true });
+    const agent = new Agent({
+      repoRoot: tmp,
+      model: "test",
+      maxIterations: 10,
+      responder,
+      verbose: false,
+      autoApprove: true,
+    });
     const result = await agent.run("Fix add()");
     expect(result.finalMessage).toContain("Fixed add()");
     expect(result.modifiedFiles).toContain("math.ts");
@@ -54,10 +76,23 @@ describe("agent loop", () => {
     let n = 0;
     const responder: Responder = async () => {
       n++;
-      if (n === 1) return { output: [fc("c1", "read_file", { path: "does-not-exist.ts" })], output_text: "" };
-      return { output: [], output_text: "## Summary\nFile missing, nothing to do.\n" };
+      if (n === 1)
+        return {
+          output: [fc("c1", "read_file", { path: "does-not-exist.ts" })],
+          output_text: "",
+        };
+      return {
+        output: [],
+        output_text: "## Summary\nFile missing, nothing to do.\n",
+      };
     };
-    const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 5, responder, verbose: false });
+    const agent = new Agent({
+      repoRoot: tmp,
+      model: "test",
+      maxIterations: 5,
+      responder,
+      verbose: false,
+    });
     const result = await agent.run("Read a missing file");
     expect(result.finalMessage).toContain("nothing to do");
   });
@@ -66,11 +101,30 @@ describe("agent loop", () => {
     let n = 0;
     const responder: Responder = async () => {
       n++;
-      if (n === 1) return { output: [{ type: "function_call", call_id: "c1", name: "read_file", arguments: "{bad json" }], output_text: "" };
+      if (n === 1)
+        return {
+          output: [
+            {
+              type: "function_call",
+              call_id: "c1",
+              name: "read_file",
+              arguments: "{bad json",
+            },
+          ],
+          output_text: "",
+        };
       return { output: [], output_text: "done" };
     };
-    const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 5, responder, verbose: false });
-    await expect(agent.run("x")).resolves.toMatchObject({ finalMessage: "done" });
+    const agent = new Agent({
+      repoRoot: tmp,
+      model: "test",
+      maxIterations: 5,
+      responder,
+      verbose: false,
+    });
+    await expect(agent.run("x")).resolves.toMatchObject({
+      finalMessage: "done",
+    });
   });
 
   it("aborts when the model repeats the identical call", async () => {
@@ -78,7 +132,13 @@ describe("agent loop", () => {
       output: [fc("c1", "read_file", { path: "math.ts" })],
       output_text: "",
     });
-    const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 20, responder, verbose: false });
+    const agent = new Agent({
+      repoRoot: tmp,
+      model: "test",
+      maxIterations: 20,
+      responder,
+      verbose: false,
+    });
     const result = await agent.run("loop forever");
     expect(result.stopReason).toBe("stuck");
     expect(result.finalMessage).toMatch(/Stuck: repeated/i);
@@ -125,7 +185,11 @@ describe("agent loop", () => {
       verbose: false,
       sleep: async () => {},
     });
-    await expect(agent.run("x")).rejects.toThrow(/rate limit persisted|roomier model/i);
+    expect(await agent.run("x")).toMatchObject({
+      status: "failed",
+      stopReason: "error",
+      finalMessage: expect.stringMatching(/429 rate limit/),
+    });
   });
 
   it("fails fast on 401 with a fix hint (no retries)", async () => {
@@ -142,16 +206,32 @@ describe("agent loop", () => {
       verbose: false,
       sleep: async () => {},
     });
-    await expect(agent.run("x")).rejects.toThrow(/authentication failed[\s\S]*\/endpoint/i);
+    expect(await agent.run("x")).toMatchObject({
+      status: "failed",
+      stopReason: "error",
+      finalMessage: expect.stringMatching(/401 Incorrect API key/),
+    });
     expect(calls).toBe(1);
   });
 
   it("respects AbortSignal cancellation", async () => {
     const controller = new AbortController();
     controller.abort();
-    const responder: Responder = async () => ({ output: [], output_text: "never" });
-    const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 5, responder, verbose: false });
-    await expect(agent.run("x", { signal: controller.signal })).rejects.toThrow(/cancelled/i);
+    const responder: Responder = async () => ({
+      output: [],
+      output_text: "never",
+    });
+    const agent = new Agent({
+      repoRoot: tmp,
+      model: "test",
+      maxIterations: 5,
+      responder,
+      verbose: false,
+    });
+    expect(await agent.run("x", { signal: controller.signal })).toMatchObject({
+      status: "cancelled",
+      stopReason: "cancelled",
+    });
   });
 
   it("handles conversational inputs directly without tool execution", async () => {
@@ -159,12 +239,24 @@ describe("agent loop", () => {
     const responder: Responder = async (input) => {
       calls++;
       // Verify no heavy repo context or task XML was injected for conversational
-      const userMessage = input[input.length - 1] as { role: string; content: string };
+      const userMessage = input[input.length - 1] as {
+        role: string;
+        content: string;
+      };
       expect(userMessage.content).toBe("can you help me?");
-      return { output: [], output_text: "Sure! What would you like to work on?" };
+      return {
+        output: [],
+        output_text: "Sure! What would you like to work on?",
+      };
     };
 
-    const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 10, responder, verbose: false });
+    const agent = new Agent({
+      repoRoot: tmp,
+      model: "test",
+      maxIterations: 10,
+      responder,
+      verbose: false,
+    });
     const result = await agent.run("can you help me?");
 
     expect(calls).toBe(1);
@@ -182,7 +274,13 @@ describe("agent loop", () => {
       calls++;
       return { output: [], output_text: "should not be called" };
     };
-    const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 10, responder, verbose: false });
+    const agent = new Agent({
+      repoRoot: tmp,
+      model: "test",
+      maxIterations: 10,
+      responder,
+      verbose: false,
+    });
     const result = await agent.run("hello");
     expect(calls).toBe(0);
     expect(result.intent).toBe("conversational");
@@ -197,9 +295,18 @@ describe("agent loop", () => {
       const dump = JSON.stringify(input);
       expect(dump).not.toContain("<repository>");
       expect(dump).not.toContain("<project_rules>");
-      return { output: [], output_text: "GitHub is a hosting platform for Git repos." };
+      return {
+        output: [],
+        output_text: "GitHub is a hosting platform for Git repos.",
+      };
     };
-    const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 10, responder, verbose: false });
+    const agent = new Agent({
+      repoRoot: tmp,
+      model: "test",
+      maxIterations: 10,
+      responder,
+      verbose: false,
+    });
     const result = await agent.run("what is github?");
     expect(result.intent).toBe("conversational");
     expect(calls).toBe(1);
@@ -214,7 +321,13 @@ describe("agent loop", () => {
         calls++;
         return { output: [], output_text: "should not be called" };
       };
-      const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 10, responder, verbose: false });
+      const agent = new Agent({
+        repoRoot: tmp,
+        model: "test",
+        maxIterations: 10,
+        responder,
+        verbose: false,
+      });
       const result = await agent.run("which is latest claude model");
       expect(result.intent).toBe("external");
       expect(calls).toBe(0);
@@ -234,22 +347,40 @@ describe("agent loop", () => {
       if (turn === 2) {
         // Second turn first call should contain the first turn's history
         expect(input.length).toBeGreaterThan(2);
-        return { output: [fc("c1", "read_file", { path: "math.ts" })], output_text: "" };
+        return {
+          output: [fc("c1", "read_file", { path: "math.ts" })],
+          output_text: "",
+        };
       }
       if (turn === 3) {
         return {
-          output: [fc("c2", "edit_file", { path: "math.ts", old_text: "return a - b;", new_text: "return a + b;" })],
+          output: [
+            fc("c2", "edit_file", {
+              path: "math.ts",
+              old_text: "return a - b;",
+              new_text: "return a + b;",
+            }),
+          ],
           output_text: "",
         };
       }
       return { output: [], output_text: "Fixed." };
     };
 
-    const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 10, responder, verbose: false, autoApprove: true });
+    const agent = new Agent({
+      repoRoot: tmp,
+      model: "test",
+      maxIterations: 10,
+      responder,
+      verbose: false,
+      autoApprove: true,
+    });
     const firstResult = await agent.run("hello");
     expect(firstResult.intent).toBe("conversational");
 
-    const secondResult = await agent.run("fix add in math.ts", { history: firstResult.history });
+    const secondResult = await agent.run("fix add in math.ts", {
+      history: firstResult.history,
+    });
     expect(secondResult.intent).toBe("task");
     expect(secondResult.modifiedFiles).toContain("math.ts");
   });
@@ -261,14 +392,22 @@ describe("agent loop", () => {
       return { output: [], output_text: "done" };
     };
 
-    const agent = new Agent({ repoRoot: tmp, model: "test", maxIterations: 5, responder, verbose: false });
+    const agent = new Agent({
+      repoRoot: tmp,
+      model: "test",
+      maxIterations: 5,
+      responder,
+      verbose: false,
+    });
     await agent.run("explain how math.ts works");
 
     const userMessage = capturedInput.find(
       (item) => (item as { role?: string }).role === "user",
     ) as { content: string };
     const systemRepoMessage = capturedInput.find(
-      (item) => (item as { role?: string }).role === "system",
+      (item) =>
+        (item as { role?: string; content?: string }).role === "system" &&
+        String((item as { content?: string }).content).includes("<repository>"),
     ) as { content: string };
 
     expect(userMessage.content).not.toContain("<task>");
@@ -342,8 +481,16 @@ describe("agent loop", () => {
 
     const res = await agent.run("Read math.ts and util.ts");
     expect(res.finalMessage).toBe("Read both files successfully.");
-    expect(res.history.some((item) => (item as { call_id?: string }).call_id === "c1")).toBe(true);
-    expect(res.history.some((item) => (item as { call_id?: string }).call_id === "c2")).toBe(true);
+    expect(
+      res.history.some(
+        (item) => (item as { call_id?: string }).call_id === "c1",
+      ),
+    ).toBe(true);
+    expect(
+      res.history.some(
+        (item) => (item as { call_id?: string }).call_id === "c2",
+      ),
+    ).toBe(true);
   });
 
   it("concludes gracefully with stopReason: budget when maxIterations is reached without throwing", async () => {
@@ -351,7 +498,11 @@ describe("agent loop", () => {
     const responder: Responder = async (input) => {
       turn++;
       return {
-        output: [fc(`c${turn}`, "read_file", { path: turn % 2 === 0 ? "math.ts" : "util.ts" })],
+        output: [
+          fc(`c${turn}`, "read_file", {
+            path: turn % 2 === 0 ? "math.ts" : "util.ts",
+          }),
+        ],
         output_text: `Working on turn ${turn}`,
       };
     };
@@ -369,8 +520,8 @@ describe("agent loop", () => {
     expect(res.stopReason).toBe("budget");
     expect(res.iterations).toBe(3);
     expect(res.finalMessage).toContain("Iteration Limit Reached");
-    expect(res.finalMessage).toContain("CodeAgent reached the maximum iteration budget");
+    expect(res.finalMessage).toContain(
+      "CodeAgent reached the maximum iteration budget",
+    );
   });
 });
-
-

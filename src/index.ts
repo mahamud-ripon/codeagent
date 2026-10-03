@@ -6,15 +6,29 @@ import process from "node:process";
 import { fileURLToPath } from "node:url";
 import { Agent } from "./agent/agent.js";
 import { PermissionManager } from "./agent/permissions.js";
-import { loadHooksSettings, loadModelSettings, loadPermissionSettings, loadSandboxSettings } from "./agent/settings.js";
-import { exitCodeForStopReason, parseOutputFormat, renderJsonResult, type OutputFormat } from "./cli/headless.js";
+import {
+  loadHooksSettings,
+  loadModelSettings,
+  loadPermissionSettings,
+  loadSandboxSettings,
+} from "./agent/settings.js";
+import {
+  exitCodeForStopReason,
+  parseOutputFormat,
+  renderJsonResult,
+  type OutputFormat,
+} from "./cli/headless.js";
 import type { AgentEvent } from "./llm/events.js";
 import { createProviderFromEnv } from "./llm/provider.js";
 import { DEFAULT_MODEL } from "./llm/provider.js";
 import { ensureEndpointForKey, loadGlobalEnv } from "./cli/config.js";
 import { startRepl } from "./cli/repl.js";
 import { setSandboxMode } from "./tools/sandbox.js";
-import { formatTimeAgo, listSessions, loadSession } from "./session/sessionManager.js";
+import {
+  formatTimeAgo,
+  listSessions,
+  loadSession,
+} from "./session/sessionManager.js";
 import { ConsoleAgentReporter, formatMarkdown, pc } from "./cli/ui/index.js";
 
 // dotenv/config above loads <cwd>/.env (per-project override).
@@ -30,10 +44,14 @@ export function installCrashGuards(): void {
   crashGuardsInstalled = true;
   process.on("unhandledRejection", (reason) => {
     const msg = reason instanceof Error ? reason.message : String(reason);
-    console.error(`codeagent: unhandled async error (session preserved): ${msg}`);
+    console.error(
+      `codeagent: unhandled async error (session preserved): ${msg}`,
+    );
   });
   process.on("uncaughtException", (error) => {
-    console.error(`codeagent failed: ${error instanceof Error ? error.message : String(error)}`);
+    console.error(
+      `codeagent failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
     process.exit(1);
   });
 }
@@ -68,12 +86,14 @@ Options:
   --allowedTools <rules>  Comma-separated allow rules, e.g. Bash(npm test:*),Edit(src/**)
   --print                 Headless: run one task and print the result
   --output-format <fmt>   text (default), json, or stream-json
-  --ui <mode>             Terminal UI: legacy (default) or next (streaming)
+  --ui <mode>             Terminal UI: next (default, interactive) or legacy (plain)
+  --detach                Run a task in the local supervisor and return its session ID
+  --attach <session-id>   Reconnect to a durable run
   --acp                   Start the ACP stdio bridge (IDE integration)
   mcp <add|list|remove>   Manage MCP servers (see /mcp in REPL)
-  -r, --resume [id]       Resume latest session (or specified session ID / index)
+  -r, --resume [id]       Resume latest supervisor session (or ID); import legacy IDs with import-session first
   -c, --continue [id]       Alias for --resume (continue where you left off)
-  --sessions              List saved sessions for this repository and exit
+  --sessions              List supervisor sessions and exit
   -h, --help              Show this help
 
 REPL slash commands:
@@ -155,9 +175,19 @@ export function parseArgs(argv: string[]): CliArgs {
     } else if (a.startsWith("--model=") || a.startsWith("-m=")) {
       model = a.slice(a.indexOf("=") + 1);
     } else if (a === "-p" || a === "--provider") {
-      provider = nextValue() as "openai" | "chat" | "anthropic" | "gemini" | undefined ?? provider;
+      provider =
+        (nextValue() as
+          | "openai"
+          | "chat"
+          | "anthropic"
+          | "gemini"
+          | undefined) ?? provider;
     } else if (a.startsWith("--provider=") || a.startsWith("-p=")) {
-      provider = a.slice(a.indexOf("=") + 1) as "openai" | "chat" | "anthropic" | "gemini";
+      provider = a.slice(a.indexOf("=") + 1) as
+        | "openai"
+        | "chat"
+        | "anthropic"
+        | "gemini";
     } else if (a === "-e" || a === "--endpoint") {
       baseURL = nextValue() ?? baseURL;
     } else if (a.startsWith("--endpoint=") || a.startsWith("-e=")) {
@@ -165,20 +195,43 @@ export function parseArgs(argv: string[]): CliArgs {
     } else if (a === "-i" || a === "--iterations" || a === "--max-iterations") {
       const v = nextValue();
       if (v !== undefined) maxIterations = Number(v);
-    } else if (a.startsWith("--max-iterations=") || a.startsWith("--iterations=") || a.startsWith("-i=")) {
+    } else if (
+      a.startsWith("--max-iterations=") ||
+      a.startsWith("--iterations=") ||
+      a.startsWith("-i=")
+    ) {
       maxIterations = Number(a.slice(a.indexOf("=") + 1));
     } else if (a === "-s" || a === "--sandbox") {
-      sandbox = nextValue() as "docker" | "local" | undefined ?? sandbox;
+      sandbox = (nextValue() as "docker" | "local" | undefined) ?? sandbox;
     } else if (a.startsWith("--sandbox=") || a.startsWith("-s=")) {
       sandbox = a.slice(a.indexOf("=") + 1) as "docker" | "local";
-    } else if (a === "-y" || a === "--yes" || a === "--auto" || a === "--auto-approve" || a === "--dangerously-skip-permissions") {
+    } else if (
+      a === "-y" ||
+      a === "--yes" ||
+      a === "--auto" ||
+      a === "--auto-approve" ||
+      a === "--dangerously-skip-permissions"
+    ) {
       autoApprove = true;
-      dangerouslySkipPermissions = a === "--dangerously-skip-permissions" || dangerouslySkipPermissions;
+      dangerouslySkipPermissions =
+        a === "--dangerously-skip-permissions" || dangerouslySkipPermissions;
     } else if (a === "--allowedTools") {
       const value = nextValue();
-      if (value) allowedTools.push(...value.split(",").map((part) => part.trim()).filter(Boolean));
+      if (value)
+        allowedTools.push(
+          ...value
+            .split(",")
+            .map((part) => part.trim())
+            .filter(Boolean),
+        );
     } else if (a.startsWith("--allowedTools=")) {
-      allowedTools.push(...a.slice("--allowedTools=".length).split(",").map((part) => part.trim()).filter(Boolean));
+      allowedTools.push(
+        ...a
+          .slice("--allowedTools=".length)
+          .split(",")
+          .map((part) => part.trim())
+          .filter(Boolean),
+      );
     } else if (a === "--print") {
       printMode = true;
     } else if (a === "--output-format") {
@@ -198,7 +251,12 @@ export function parseArgs(argv: string[]): CliArgs {
       break;
     } else if (a === "--sessions") {
       showSessions = true;
-    } else if (a === "-r" || a === "--resume" || a === "-c" || a === "--continue") {
+    } else if (
+      a === "-r" ||
+      a === "--resume" ||
+      a === "-c" ||
+      a === "--continue"
+    ) {
       if (i + 1 < argv.length && !argv[i + 1].startsWith("-")) {
         resume = argv[++i];
       } else {
@@ -217,8 +275,16 @@ export function parseArgs(argv: string[]): CliArgs {
     console.error("Error: --max-iterations must be a positive number.");
     process.exit(4);
   }
-  if (provider !== undefined && provider !== "openai" && provider !== "chat" && provider !== "anthropic" && provider !== "gemini") {
-    console.error("Error: --provider must be 'openai', 'chat', 'anthropic', or 'gemini'.");
+  if (
+    provider !== undefined &&
+    provider !== "openai" &&
+    provider !== "chat" &&
+    provider !== "anthropic" &&
+    provider !== "gemini"
+  ) {
+    console.error(
+      "Error: --provider must be 'openai', 'chat', 'anthropic', or 'gemini'.",
+    );
     process.exit(4);
   }
   if (sandbox !== undefined && sandbox !== "docker" && sandbox !== "local") {
@@ -269,16 +335,20 @@ async function runOneShot(
   })) {
     console.log(pc.yellow(notice));
   }
-  const { responder, info, providerInstance, systemPrompt } = createProviderFromEnv(process.env, {
-    model: opts.model,
-    provider: opts.provider,
-    baseURL: opts.baseURL,
-  });
-  const quiet = opts.outputFormat === "json" || opts.outputFormat === "stream-json";
+  const { responder, info, providerInstance, systemPrompt } =
+    createProviderFromEnv(process.env, {
+      model: opts.model,
+      provider: opts.provider,
+      baseURL: opts.baseURL,
+    });
+  const quiet =
+    opts.outputFormat === "json" || opts.outputFormat === "stream-json";
   if (!quiet) {
     console.log("");
     console.log(`  ${pc.bold("Workspace:")}  ${pc.white(repoRoot)}`);
-    console.log(`  ${pc.bold("Model:")}      ${pc.yellow(info.model)}${info.baseURL ? pc.dim(` (${info.baseURL})`) : ""}`);
+    console.log(
+      `  ${pc.bold("Model:")}      ${pc.yellow(info.model)}${info.baseURL ? pc.dim(` (${info.baseURL})`) : ""}`,
+    );
     console.log(`  ${pc.bold("Task:")}       ${pc.cyan(task)}`);
     console.log(pc.dim("  Tip: Ctrl+C cancels a running task."));
     console.log("");
@@ -296,7 +366,7 @@ async function runOneShot(
   const bypass = opts.autoApprove === true;
   const permissions = new PermissionManager({
     autoApprove: bypass,
-    mode: bypass ? "bypass" : settings.mode ?? "default",
+    mode: bypass ? "bypass" : (settings.mode ?? "default"),
     allow: [...settings.allow, ...(opts.allowedTools ?? [])],
     deny: settings.deny,
     ask: settings.ask,
@@ -320,18 +390,21 @@ async function runOneShot(
   if (hooks.UserPromptSubmit) {
     try {
       const { runHooks } = await import("./agent/hooks.js");
-      await runHooks(hooks, "UserPromptSubmit", { prompt: task.slice(0, 4000) });
+      await runHooks(hooks, "UserPromptSubmit", {
+        prompt: task.slice(0, 4000),
+      });
     } catch {
       // ignore
     }
   }
   const reporter = quiet ? undefined : new ConsoleAgentReporter(repoRoot);
-  const onEvent = opts.outputFormat === "stream-json"
-    ? (event: AgentEvent) => {
-        if ("respond" in event) return;
-        console.log(JSON.stringify(event));
-      }
-    : undefined;
+  const onEvent =
+    opts.outputFormat === "stream-json"
+      ? (event: AgentEvent) => {
+          if ("respond" in event) return;
+          console.log(JSON.stringify(event));
+        }
+      : undefined;
   const agent = new Agent({
     repoRoot,
     model: info.model,
@@ -345,15 +418,20 @@ async function runOneShot(
     baseURL: opts.baseURL,
     autoApprove: bypass,
     onEvent,
-    summarizer: roles.fast && roles.fast !== info.model
-      ? (() => {
-          try {
-            return createProviderFromEnv(process.env, { model: roles.fast, provider: opts.provider, baseURL: opts.baseURL }).responder;
-          } catch {
-            return undefined;
-          }
-        })()
-      : undefined,
+    summarizer:
+      roles.fast && roles.fast !== info.model
+        ? (() => {
+            try {
+              return createProviderFromEnv(process.env, {
+                model: roles.fast,
+                provider: opts.provider,
+                baseURL: opts.baseURL,
+              }).responder;
+            } catch {
+              return undefined;
+            }
+          })()
+        : undefined,
     capabilitiesOverride: modelSettings.capabilities,
     modelRoles: roles,
     planResponder,
@@ -365,14 +443,20 @@ async function runOneShot(
     const result = await agent.run(task, { signal: controller.signal });
     const tookSeconds = (Date.now() - startedAt) / 1000;
     if (opts.outputFormat === "json" || opts.outputFormat === "stream-json") {
-      console.log(renderJsonResult({
-        ok: result.stopReason !== "permission" && result.stopReason !== "budget" && result.stopReason !== "error" && result.stopReason !== "stuck",
-        stopReason: result.stopReason ?? "ok",
-        finalMessage: result.finalMessage,
-        iterations: result.iterations,
-        modifiedFiles: result.modifiedFiles,
-        usage: result.usage,
-      }));
+      console.log(
+        renderJsonResult({
+          ok:
+            result.stopReason !== "permission" &&
+            result.stopReason !== "budget" &&
+            result.stopReason !== "error" &&
+            result.stopReason !== "stuck",
+          stopReason: result.stopReason ?? "ok",
+          finalMessage: result.finalMessage,
+          iterations: result.iterations,
+          modifiedFiles: result.modifiedFiles,
+          usage: result.usage,
+        }),
+      );
       process.exit(exitCodeForStopReason(result.stopReason));
     }
     console.log("");
@@ -386,7 +470,9 @@ async function runOneShot(
     ];
     if (result.testResults.length > 0) {
       const passed = result.testResults.filter((t) => t.exitCode === 0).length;
-      stats.push(`${pc.bold("tests:")} ${passed === result.testResults.length ? pc.green(`all ${passed} passed`) : pc.yellow(`${passed}/${result.testResults.length} passed`)}`);
+      stats.push(
+        `${pc.bold("tests:")} ${passed === result.testResults.length ? pc.green(`all ${passed} passed`) : pc.yellow(`${passed}/${result.testResults.length} passed`)}`,
+      );
     }
     console.log(pc.dim("─".repeat(50)));
     console.log(`  ${stats.join(" · ")}`);
@@ -399,7 +485,11 @@ async function runOneShot(
       console.error(pc.yellow("\nRun cancelled."));
       process.exit(130);
     }
-    console.error(pc.red(`\nAgent failed: ${error instanceof Error ? error.message : error}`));
+    console.error(
+      pc.red(
+        `\nAgent failed: ${error instanceof Error ? error.message : error}`,
+      ),
+    );
     process.exit(exitCodeForStopReason("error"));
   }
 }
@@ -412,8 +502,23 @@ async function readStdin(): Promise<string> {
 }
 
 async function main(): Promise<void> {
+  if (process.argv.includes("--runtime-supervisor")) {
+    loadGlobalEnv();
+    const { startSupervisor } = await import("./runtime/supervisor.js");
+    const service = await startSupervisor();
+    const stop = () => {
+      void service.close().then(() => process.exit(0));
+    };
+    process.once("SIGTERM", stop);
+    process.once("SIGINT", stop);
+    return;
+  }
+
   const args = parseArgs(process.argv.slice(2));
   const repoRoot = path.resolve(args.repo);
+  const { runtimeCli } = await import("./runtime/cli.js");
+  if (await runtimeCli({ ...args, repo: repoRoot }, process.argv.slice(2)))
+    return;
 
   if (args.acp) {
     const { startAcpServer } = await import("./integrations/acp.js");
@@ -431,11 +536,17 @@ async function main(): Promise<void> {
   // `mcp` is parsed as mcpArgs above; plugin uses the same trailing-args shape.
   const rawArgv = process.argv.slice(2);
   if (rawArgv[0] === "plugin") {
-    const { installPlugin, listPlugins, removePlugin } = await import("./extensions/plugins.js");
+    const { installPlugin, listPlugins, removePlugin } = await import(
+      "./extensions/plugins.js"
+    );
     const sub = rawArgv[1];
     if (sub === "list") {
       const names = await listPlugins();
-      console.log(names.length ? `Plugins (${names.length}):\n${names.map((n) => `  - ${n}`).join("\n")}` : "No plugins installed (~/.codeagent/plugins).");
+      console.log(
+        names.length
+          ? `Plugins (${names.length}):\n${names.map((n) => `  - ${n}`).join("\n")}`
+          : "No plugins installed (~/.codeagent/plugins).",
+      );
       return;
     }
     if (sub === "install") {
@@ -484,9 +595,17 @@ async function main(): Promise<void> {
   const wantSandbox = args.sandbox ?? sandboxFromSettings.mode;
   if (wantSandbox) {
     const res = await setSandboxMode(wantSandbox);
-    console.log(res.success ? pc.green(`  ✔ ${res.message}`) : pc.yellow(`  ⚠ ${res.message}`));
+    console.log(
+      res.success
+        ? pc.green(`  ✔ ${res.message}`)
+        : pc.yellow(`  ⚠ ${res.message}`),
+    );
     if (sandboxFromSettings.image) {
-      console.log(pc.dim(`  Sandbox image: ${sandboxFromSettings.image}${sandboxFromSettings.network === false ? " (network: none)" : ""}`));
+      console.log(
+        pc.dim(
+          `  Sandbox image: ${sandboxFromSettings.image}${sandboxFromSettings.network === false ? " (network: none)" : ""}`,
+        ),
+      );
     }
   }
 
@@ -500,19 +619,30 @@ async function main(): Promise<void> {
       const list = listSessions(repoRoot);
       if (typeof args.resume === "string" && args.resume) {
         const num = Number(args.resume);
-        const targetId = !isNaN(num) && num >= 1 && num <= list.length ? list[num - 1].id : args.resume;
+        const targetId =
+          !isNaN(num) && num >= 1 && num <= list.length
+            ? list[num - 1].id
+            : args.resume;
         const loaded = loadSession(targetId);
         if (loaded) {
           activeSession = loaded;
-          console.log(`Resuming session ${loaded.id}: "${loaded.title}" (${Math.floor((loaded.history?.length ?? 0) / 2)} turn(s))`);
+          console.log(
+            `Resuming session ${loaded.id}: "${loaded.title}" (${Math.floor((loaded.history?.length ?? 0) / 2)} turn(s))`,
+          );
         } else {
-          console.warn(`Session "${args.resume}" not found. Starting fresh session.`);
+          console.warn(
+            `Session "${args.resume}" not found. Starting fresh session.`,
+          );
         }
       } else if (list.length > 0) {
         activeSession = list[0];
-        console.log(`Resuming latest session ${activeSession.id}: "${activeSession.title}" (${Math.floor((activeSession.history?.length ?? 0) / 2)} turn(s))`);
+        console.log(
+          `Resuming latest session ${activeSession.id}: "${activeSession.title}" (${Math.floor((activeSession.history?.length ?? 0) / 2)} turn(s))`,
+        );
       } else {
-        console.log("No previous sessions found to resume. Starting fresh session.");
+        console.log(
+          "No previous sessions found to resume. Starting fresh session.",
+        );
       }
     }
 
@@ -537,7 +667,9 @@ async function main(): Promise<void> {
     maxIterations: args.maxIterations,
     autoApprove: args.autoApprove,
     allowedTools: args.allowedTools,
-    outputFormat: args.printMode ? args.outputFormat ?? "text" : args.outputFormat,
+    outputFormat: args.printMode
+      ? (args.outputFormat ?? "text")
+      : args.outputFormat,
   });
 }
 
@@ -549,7 +681,10 @@ async function main(): Promise<void> {
 const invokedDirectly = (() => {
   if (!process.argv[1]) return false;
   try {
-    return fs.realpathSync(process.argv[1]) === fs.realpathSync(fileURLToPath(import.meta.url));
+    return (
+      fs.realpathSync(process.argv[1]) ===
+      fs.realpathSync(fileURLToPath(import.meta.url))
+    );
   } catch {
     return false;
   }
@@ -557,8 +692,10 @@ const invokedDirectly = (() => {
 
 if (invokedDirectly) {
   main().catch((error) => {
-    console.error("codeagent failed:", error instanceof Error ? error.message : error);
+    console.error(
+      "codeagent failed:",
+      error instanceof Error ? error.message : error,
+    );
     process.exit(1);
   });
 }
-
