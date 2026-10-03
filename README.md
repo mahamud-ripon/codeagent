@@ -35,7 +35,7 @@ codeagent undo <session-id>
 codeagent import-session /path/to/legacy-session.json
 ```
 
-Interactive commands: `/new`, `/status`, `/tasks`, `/agents`, `/jobs`, `/fork`, `/undo`, `/detach`, and `/exit`. Ctrl+C cancels an attached run. Closing the client leaves the supervisor running. `/detach` exits the idle prompt; `--detach` starts a run without attaching.
+Run `codeagent` for the full-screen terminal UI: streamed Markdown responses, tool activity, approval prompts, and views for tasks, agents, jobs, and sessions. Tab switches views; PageUp/PageDown scroll; Alt+Enter adds a line. Ctrl+C cancels an active run; Ctrl+D detaches while work continues. Use `/help` for commands, `/sessions` to switch sessions, or `--ui legacy` for the plain prompt. See the [terminal UI guide](docs/ui-next.md) for controls and terminal requirements.
 
 `--print --output-format json` returns a structured result; `stream-json` emits versioned runtime events. Headless runs needing approval remain pending and print their session ID. Use `--attach` from a terminal to answer.
 

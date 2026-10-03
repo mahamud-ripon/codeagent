@@ -34,6 +34,7 @@ export async function buildInitialContext(
   rules: LoadedRule[] = [],
   memory: LoadedRule[] = [],
   query?: string,
+  options: { includeSkills?: boolean } = {},
 ): Promise<string> {
   const map = await buildRepoMap(repoRoot);
   const lines = [
@@ -75,6 +76,7 @@ export async function buildInitialContext(
 
   // Skills (EX-4): descriptions always in context.
   try {
+    if (options.includeSkills === false) return lines.join("\n");
     const { loadSkills, skillContextBlock } = await import("./skills.js");
     const skills = await loadSkills(repoRoot);
     const block = skillContextBlock(skills);

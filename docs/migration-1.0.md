@@ -8,7 +8,7 @@
 6. Replace assumptions about Docker fallback: requested Docker execution now fails closed. Use explicit local mode when host execution is intended.
 7. Treat `completed`, `blocked`, `failed`, `cancelled`, and `paused` distinctly. A textual answer or exhausted stop-hook retry budget does not establish success.
 
-The interactive runtime prompt supports `/new`, `/status`, `/tasks`, `/agents`, `/jobs`, `/fork`, `/undo`, `/detach`, and `/exit`. Configure provider/model/permission options through launch flags and settings. Old UI helpers remain available internally; production sessions use the supervisor client.
+The default interactive CLI now uses a full-screen [terminal UI](ui-next.md). Use `--ui legacy` for the plain prompt, or `--print` for scripts. The interactive runtime supports `/new`, `/status`, `/tasks`, `/agents`, `/jobs`, `/fork`, `/undo`, `/detach`, and `/exit`. Configure provider/model/permission options through launch flags and settings. Old UI helpers remain available internally; production sessions use the supervisor client.
 
 A detached supervisor retains its startup environment. After changing provider credentials, restart that supervisor when no tasks are running so new runs use the updated environment. Its PID is recorded in `~/.codeagent/runtime/v1/supervisor.lock`.
 

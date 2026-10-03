@@ -160,6 +160,17 @@ export function fromProvider(items: unknown[]): Message[] {
           id: String(x.call_id),
           text: String(x.output ?? ""),
         };
+      if (x.type === "message" && (x.role === undefined || x.role === "assistant")) {
+        // Responses API text blocks and the streaming adapters' plain strings
+        // represent the same internal assistant message.
+        const content = x.content;
+        const text = typeof content === "string" ? content :
+          Array.isArray(content) && content.every((c) => c &&
+            typeof c === "object" && ["output_text", "text"].includes(c.type) &&
+            typeof c.text === "string")
+            ? content.map((c) => c.text).join("") : undefined;
+        if (text !== undefined) return { kind: "text", role: "assistant", text };
+      }
       if (
         ["system", "user", "assistant"].includes(String(x.role)) &&
         typeof x.content === "string"

@@ -86,7 +86,7 @@ Options:
   --allowedTools <rules>  Comma-separated allow rules, e.g. Bash(npm test:*),Edit(src/**)
   --print                 Headless: run one task and print the result
   --output-format <fmt>   text (default), json, or stream-json
-  --ui <mode>             Terminal UI: legacy (default) or next (streaming)
+  --ui <mode>             Terminal UI: next (default, interactive) or legacy (plain)
   --detach                Run a task in the local supervisor and return its session ID
   --attach <session-id>   Reconnect to a durable run
   --acp                   Start the ACP stdio bridge (IDE integration)

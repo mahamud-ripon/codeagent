@@ -5,6 +5,12 @@ import type { CliArgs } from "../index.js";
 import type { RuntimeEvent, SessionSnapshot } from "./contracts.js";
 import { exitCodeForStopReason } from "../cli/headless.js";
 import { loadGlobalEnv } from "../cli/config.js";
+import { loadModelSettings } from "../agent/settings.js";
+
+export function shouldUseTui(args: CliArgs, raw: string[], inputTTY = process.stdin.isTTY, outputTTY = process.stdout.isTTY): boolean {
+  return !!inputTTY && !!outputTTY && process.env.TERM !== "dumb" &&
+    !args.printMode && (args.outputFormat ?? "text") === "text" && args.ui !== "legacy" && !raw.includes("--detach");
+}
 
 export async function runtimeCli(
   args: CliArgs,
@@ -30,6 +36,7 @@ export async function runtimeCli(
     return rl.question(prompt);
   };
   const show = async (handle: RunHandle): Promise<void> => {
+    const textOutput = new RuntimeTextOutput();
     console.error(
       `Session ${handle.sessionId} · attach with codeagent --attach ${handle.sessionId}`,
     );
@@ -62,8 +69,7 @@ export async function runtimeCli(
               : answer,
           );
         }
-        if (output === "text" && e.type === "text_delta")
-          process.stdout.write(String(e.data.text ?? ""));
+        if (output === "text") process.stdout.write(textOutput.render(e));
         if (
           output === "text" &&
           [
@@ -80,10 +86,7 @@ export async function runtimeCli(
           );
         if (e.type === "done" && e.agentId === "coordinator") {
           if (output === "json") console.log(JSON.stringify(e.data));
-          else if (output === "text")
-            console.log(
-              `\n${String(e.data.finalMessage ?? "")}\nStatus: ${String(e.data.status)}`,
-            );
+
           process.exitCode = exitCodeForStopReason(String(e.data.stopReason));
           return;
         }
@@ -149,6 +152,19 @@ export async function runtimeCli(
       return true;
     }
     const attach = after("--attach");
+    if (shouldUseTui(args, raw)) {
+      let sessionId = attach;
+      if (!sessionId && args.resume) {
+        sessionId = typeof args.resume === "string" ? args.resume :
+          (await client.request<SessionSnapshot[]>("list")).filter((s) => s.repoRoot === args.repo).at(-1)?.id;
+        if (!sessionId) throw new Error("No session to resume");
+      }
+      const { runTui } = await import("../cli/tui/terminal.js");
+      const { DEFAULT_MODEL } = await import("../llm/provider.js");
+      await runTui(client, args, { sessionId, task: args.task,
+        model: args.model ?? loadModelSettings(args.repo).main ?? process.env.MODEL ?? DEFAULT_MODEL });
+      return true;
+    }
     if (attach) {
       await show(await client.attach(attach));
       return true;
@@ -183,12 +199,22 @@ export async function runtimeCli(
       return true;
     }
     console.log(
-      "CodeAgent 1.0 · /new /status /tasks /agents /jobs /fork /detach /exit",
+      "CodeAgent 1.0 · /help /sessions /new /status /tasks /agents /jobs /fork /detach /exit",
     );
     while (process.stdin.isTTY) {
       const line = (await ask("codeagent> ")).trim();
       if (!line) continue;
       if (line === "/exit" || line === "/detach") break;
+      if (line === "/help") {
+        console.log("Commands: /sessions /new /status /tasks /agents /jobs /undo /fork /detach /exit. Use codeagent --resume <session-id> to resume a session.");
+        continue;
+      }
+      if (line === "/sessions") {
+        const sessions = await client.request<SessionSnapshot[]>("list");
+        console.log(JSON.stringify(sessions.map(({ id, repoRoot, status, runId }) =>
+          ({ id, repoRoot, status, runId })), null, 2));
+        continue;
+      }
       if (line === "/new") {
         sessionId = undefined;
         continue;
@@ -234,11 +260,43 @@ export async function runtimeCli(
         ).id;
         continue;
       }
+      if (line.startsWith("/")) {
+        console.log(`Unknown command: ${line.split(/\s+/)[0]}. Use /help to list available commands.`);
+        continue;
+      }
       sessionId ??= (await newSession()).id;
       await show(await client.submit(sessionId, line));
     }
     return true;
   } finally {
     rl?.close();
+  }
+}
+
+/** Text rendering state belongs to one attached run, not the session history. */
+export class RuntimeTextOutput {
+  private streamed = "";
+  render(event: RuntimeEvent): string {
+    if (event.agentId !== "coordinator") return "";
+    if (event.type === "model_start" && event.data.role !== "compaction") {
+      const separator = this.streamed && !this.streamed.endsWith("\n") ? "\n" : "";
+      this.streamed = "";
+      return separator;
+    }
+    if (event.type === "text_delta") {
+      const text = String(event.data.text ?? "");
+      this.streamed += text;
+      return text;
+    }
+    if (event.type === "done") {
+      const final = String(event.data.finalMessage ?? "");
+      // Keep any new suffix (e.g. blocked completion criteria). Nonstreaming
+      // responses and failed turns still need their full final message.
+      const rest = this.streamed && final.startsWith(this.streamed)
+        ? final.slice(this.streamed.length) : final;
+      const prefix = rest && this.streamed && !final.startsWith(this.streamed) ? "\n" : "";
+      return `${prefix}${rest}\nStatus: ${String(event.data.status)}\n`;
+    }
+    return "";
   }
 }

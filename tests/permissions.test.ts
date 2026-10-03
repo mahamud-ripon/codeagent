@@ -1,4 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { PermissionManager } from "../src/agent/permissions.js";
 import { Agent } from "../src/agent/agent.js";
 import type { Responder } from "../src/llm/client.js";
@@ -72,21 +75,39 @@ describe("Agent with PermissionManager", () => {
       };
     };
 
+    const deny = vi.fn(async () => false);
+    const runCommand = vi.fn(async () => {
+      throw new Error("A denied command must never reach the runner");
+    });
     const pm = new PermissionManager({
       autoApprove: false,
-      handler: async () => false, // deny all
+      handler: deny,
     });
 
-    const agent = new Agent({
-      repoRoot: ".",
-      model: "test",
-      maxIterations: 5,
-      responder,
-      permissions: pm,
-      verbose: false,
-    });
+    // Exercise the real loop without scanning/hashing the developer's checkout.
+    const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "codeagent-denial-"));
+    try {
+      const agent = new Agent({
+        repoRoot,
+        model: "test",
+        maxIterations: 5,
+        responder,
+        permissions: pm,
+        commandRunner: { run: runCommand },
+        verbose: false,
+      });
 
-    const result = await agent.run("run drop database");
-    expect(result.finalMessage).toContain("skipping the command");
-  });
+      const result = await agent.run("run drop database");
+      expect(result.finalMessage).toContain("skipping the command");
+      expect(result.status).toBe("completed");
+      expect(step).toBe(2);
+      expect(deny).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+        type: "command", target: "drop database",
+      }));
+      expect(runCommand).not.toHaveBeenCalled();
+    } finally {
+      await fs.rm(repoRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+    }
+    // The loop still launches real Git probes; allow for busy Windows runners.
+  }, 30_000);
 });

@@ -25,7 +25,7 @@ codeagent inspect <session-id>
 
 Clients connect to a local supervisor. Disconnecting leaves work running. An unattended request for approval remains pending; attach interactively to answer it. Auto-approval requires an explicit option or permission rule.
 
-The interactive prompt supports `/new`, `/status`, `/tasks`, `/agents`, `/jobs`, `/fork`, `/undo`, `/detach`, and `/exit`. Use settings and launch flags for model, sandbox, and permission configuration. See [migration](migration-1.0.md) for replaced legacy controls.
+Run `codeagent` to open the full-screen [terminal UI](ui-next.md). Tab switches views; Ctrl+D detaches; `--ui legacy` selects the plain prompt. The interface supports `/new`, `/status`, `/tasks`, `/agents`, `/jobs`, `/fork`, `/undo`, `/detach`, and `/exit`. Use settings and launch flags for model, sandbox, and permission configuration. See [migration](migration-1.0.md) for replaced legacy controls.
 
 ## Headless
 

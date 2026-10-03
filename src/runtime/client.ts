@@ -13,7 +13,9 @@ export class RuntimeClient {
   async request<T = unknown>(
     method: string,
     params: Record<string, unknown> = {},
+    signal?: AbortSignal,
   ): Promise<T> {
+    signal?.throwIfAborted();
     const connection = JSON.parse(
       fs.readFileSync(path.join(this.root, "connection.json"), "utf8"),
     ) as { token: string; endpoint: string };
@@ -25,6 +27,7 @@ export class RuntimeClient {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
+        signal?.removeEventListener("abort", abort);
         socket.destroy();
         error ? reject(error) : resolve(value as T);
       };
@@ -32,6 +35,9 @@ export class RuntimeClient {
         () => done(new Error("Supervisor request timed out")),
         15000,
       );
+      const abort = () => done(new Error("Client detached"));
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
       socket.on("error", (error) => done(error));
       socket.on("close", () => {
         if (!settled) done(new Error("Supervisor connection closed"));
@@ -143,13 +149,13 @@ export class RunHandle {
     public sessionId: string,
     public runId: string,
   ) {}
-  async *events(after = 0): AsyncGenerator<RuntimeEvent> {
+  async *events(after = 0, signal?: AbortSignal): AsyncGenerator<RuntimeEvent> {
     for (;;) {
       const events = await this.client.request<RuntimeEvent[]>("events", {
         sessionId: this.sessionId,
         after,
         wait: true,
-      });
+      }, signal);
       for (const e of events) {
         after = e.sequence;
         if (e.runId !== this.runId) continue;
